@@ -26,9 +26,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let touch = cfg!(target_os = "android");
     let button_size = if touch { 44.0 } else { 28.0 };
     let button_pitch = if touch { 52.0 } else { 38.0 };
+    let control_y = if touch { rect.min.y + 26.0 } else { rect.center().y };
     let mut x = rect.min.x + if app.integrated_titlebar { 104.0 } else { 14.0 };
     // Home
-    let home = Rect::from_center_size(pos2(x + button_size * 0.5, rect.center().y), vec2(button_size, button_size));
+    let home = Rect::from_center_size(pos2(x + button_size * 0.5, control_y), vec2(button_size, button_size));
     let hresp = ui.interact(home, egui::Id::new("hdr-home"), Sense::click()).on_hover_text(tl!("Home"));
     app.auto.add("header.home", home, "Home");
     if hresp.hovered() {
@@ -44,17 +45,15 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let active = app.ui.mode == m;
         let galley = p.layout_no_wrap(shown.to_string(), Tokens::ui(14.0), if active { t.tab_text_active } else { t.tab_text });
         let mode_h = if touch { 44.0 } else { rect.height() - 12.0 };
-        let r = Rect::from_min_size(pos2(x - 6.0, rect.center().y - mode_h * 0.5), vec2((galley.size().x + 12.0).max(if touch { 44.0 } else { 0.0 }), mode_h));
+        let r = Rect::from_min_size(pos2(x - 6.0, control_y - mode_h * 0.5), vec2((galley.size().x + 12.0).max(if touch { 44.0 } else { 0.0 }), mode_h));
         let resp = ui.interact(r, egui::Id::new(("mode", label)), Sense::click());
         app.auto.add(&format!("header.mode.{}", label.to_ascii_lowercase()), r, label);
         let col = if active || resp.hovered() { t.tab_text_active } else { t.tab_text };
         let gw = galley.size().x;
-        p.galley_with_override_text_color(pos2(x, rect.center().y - galley.size().y / 2.0), galley, col);
+        p.galley_with_override_text_color(pos2(x, control_y - galley.size().y / 2.0), galley, col);
         if active {
-            p.line_segment(
-                [pos2(x, rect.max.y - if touch { 7.0 } else { 9.0 }), pos2(x + gw, rect.max.y - if touch { 7.0 } else { 9.0 })],
-                Stroke::new(2.0, t.tab_text_active),
-            );
+            let underline_y = if touch { control_y + 22.0 } else { rect.max.y - 9.0 };
+            p.line_segment([pos2(x, underline_y), pos2(x + gw, underline_y)], Stroke::new(2.0, t.tab_text_active));
         }
         if resp.clicked() {
             app.ui.mode = m;
@@ -64,13 +63,25 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut left_end = x;
     // In-window menus when there is no native menu bar.
     if app.ui.show_menu_bar {
-        let menu_vpad = if touch { 4.0 } else { 7.0 };
-        let menu_rect = Rect::from_min_max(pos2(x + 6.0, rect.min.y + menu_vpad), pos2((x + 520.0).min(rect.max.x), rect.max.y - menu_vpad));
+        let menu_vpad = if touch { 0.0 } else { 7.0 };
+        let menu_left = if touch { (rect.min.x + 8.0).min(rect.max.x) } else { (x + 6.0).min(rect.max.x) };
+        let menu_right = (x + 520.0).max(menu_left).min(rect.max.x);
+        let menu_top = if touch { (rect.min.y + 52.0).min(rect.max.y) } else { (rect.min.y + menu_vpad).min(rect.max.y) };
+        let menu_bottom = (rect.max.y - menu_vpad).max(menu_top);
+        let menu_rect = Rect::from_min_max(pos2(menu_left, menu_top), pos2(menu_right, menu_bottom));
         let mut mu = ui.new_child(egui::UiBuilder::new().max_rect(menu_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
         mu.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         mu.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
         mu.style_mut().visuals.override_text_color = Some(t.text_dim);
-        crate::menus::menu_bar(app, &mut mu);
+        if touch {
+            egui::ScrollArea::horizontal()
+                .id_salt("header-menu-bar-touch")
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(&mut mu, |menu_ui| crate::menus::menu_bar(app, menu_ui));
+        } else {
+            crate::menus::menu_bar(app, &mut mu);
+        }
         left_end = mu.min_rect().max.x;
     }
     // Document title, centred
@@ -79,7 +90,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut rx = rect.max.x - 14.0;
     let mut btn = |ui: &mut egui::Ui, icon: Icon, id: &str, tip: &str, app: &mut FilmcraftApp| -> egui::Response {
         let half = button_size * 0.5;
-        let r = Rect::from_center_size(pos2(rx - half, rect.center().y), vec2(button_size, button_size));
+        let r = Rect::from_center_size(pos2(rx - half, control_y), vec2(button_size, button_size));
         rx -= button_pitch;
         let resp = ui.interact(r, egui::Id::new(("hdr", id)), Sense::click()).on_hover_text(tip);
         app.auto.add(&format!("header.{id}"), r, tip);
@@ -93,17 +104,17 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let fs = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
     }
-    if btn(ui, Icon::Speaker, "volume", tl!("Volume"), app).clicked() {
+    if !touch && btn(ui, Icon::Speaker, "volume", tl!("Volume"), app).clicked() {
         app.ui.status = tl!("Master volume: use the Audio Track Mixer").into();
     }
     if btn(ui, Icon::Search, "search", tl!("Search"), app).clicked() {
         app.show_panel(crate::dock::PanelKind::Effects);
     }
-    if btn(ui, Icon::Bell, "notifications", tl!("Progress"), app).clicked() {
+    if !touch && btn(ui, Icon::Bell, "notifications", tl!("Progress"), app).clicked() {
         app.ui.mode = Mode::Export;
     }
     // Quick Export: a popup with File Name & Location, a preset list and Export (Premiere 26)
-    let qx = rect.max.x - 14.0 - 4.0 * button_pitch - button_size * 0.5; // the fifth button from the right
+    let qx = rect.max.x - 14.0 - (if touch { 2.0 } else { 4.0 }) * button_pitch - button_size * 0.5;
     if btn(ui, Icon::Export, "quickExport", tl!("Quick Export"), app).clicked() {
         app.ui.export.quick_open = !app.ui.export.quick_open;
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("quick-export-toggled"), true));
@@ -125,14 +136,14 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let wg = p.layout_no_wrap(ws.clone(), Tokens::ui(11.0), t.text_dim);
     let workspace_h = if touch { 44.0 } else { 20.0 };
     let wr = Rect::from_min_size(
-        pos2(rx - wg.size().x + 10.0, rect.center().y - workspace_h * 0.5),
+        pos2(rx - wg.size().x + 10.0, control_y - workspace_h * 0.5),
         vec2((wg.size().x + 8.0).max(if touch { 44.0 } else { 0.0 }), workspace_h),
     );
     let wresp = ui.interact(wr, egui::Id::new("hdr-ws-name"), Sense::click());
     app.auto.add("header.workspaceName", wr, &ws);
-    p.galley_with_override_text_color(pos2(wr.min.x + 4.0, rect.center().y - wg.size().y / 2.0), wg, if wresp.hovered() { t.text } else { t.text_dim });
+    p.galley_with_override_text_color(pos2(wr.min.x + 4.0, control_y - wg.size().y / 2.0), wg, if wresp.hovered() { t.text } else { t.text_dim });
     // Community: a labelled Discord button, always one click away.
-    {
+    if !touch {
         let label = "Discord";
         let g = p.layout_no_wrap(label.to_string(), Tokens::ui(12.0), Color32::WHITE);
         let w = g.size().x + 34.0;

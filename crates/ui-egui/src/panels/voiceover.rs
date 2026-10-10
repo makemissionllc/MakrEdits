@@ -92,6 +92,17 @@ pub fn toggle(app: &mut FilmcraftApp, track: Option<u64>) -> Result<Value, Strin
     if app.playback.playing {
         app.stop();
     }
+    if app.hooks.android_request_microphone.is_some() && app.android_microphone_granted != Some(true) {
+        if app.pending_android_voiceover.is_some() {
+            app.ui.status = "Waiting for the microphone permission prompt…".into();
+            return Ok(Value::Null);
+        }
+        let Some(request) = app.hooks.android_request_microphone.as_mut() else { return Ok(Value::Null) };
+        request()?;
+        app.pending_android_voiceover = Some(track);
+        app.ui.status = "Allow microphone access to record voice-over.".into();
+        return Ok(Value::Null);
+    }
     let p = match track {
         Some(t) => json!({"track": t}),
         None => json!({}),

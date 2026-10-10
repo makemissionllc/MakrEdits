@@ -135,14 +135,18 @@ pub fn output_path(ex: &ExportUi) -> String {
 }
 
 /// Engine params for the current settings (`file.exportMedia` / `export.queue.add`).
-pub fn export_params(app: &FilmcraftApp) -> Value {
+pub fn export_params(app: &mut FilmcraftApp) -> Result<Value, String> {
     let ex = &app.ui.export;
-    let mut p = json!({"path": output_path(ex), "settings": settings_json(&ex.settings), "range": ex.range});
+    let mut path = output_path(ex);
+    if let Some(prepare) = app.hooks.android_private_export_path.as_mut() {
+        path = prepare(&path)?;
+    }
+    let mut p = json!({"path": path, "settings": settings_json(&ex.settings), "range": ex.range});
     if ex.range == "custom" {
         p["startSeconds"] = json!(ex.custom_start);
         p["endSeconds"] = json!(ex.custom_end);
     }
-    p
+    Ok(p)
 }
 
 fn sync_sequence(app: &mut FilmcraftApp) {
@@ -284,10 +288,15 @@ fn queue_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         action = Some(("export.queue.clear", json!({})));
     }
     reg.flush(app);
-    if let Some((cmd, p)) = action
-        && let Err(e) = app.session.execute(cmd, p)
-    {
-        app.ui.status = e.to_string();
+    if let Some((cmd, p)) = action {
+        if app.hooks.android_private_export_path.is_some()
+            && (cmd == "export.queue.start" || (cmd == "export.queue.retry" && p.get("start").and_then(Value::as_bool) == Some(true)))
+        {
+            app.android_export_started();
+        }
+        if let Err(e) = app.session.execute(cmd, p) {
+            app.ui.status = e.to_string();
+        }
     }
 }
 
@@ -404,12 +413,19 @@ fn settings_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.label(egui::RichText::new(tl!("Media File")).strong().size(14.0));
         ui.add_space(6.0);
         row(ui, &t, tl!("File Name"), |ui| text(ui, &mut reg, "export.fileName", &mut ex.file_name, tl!("Sequence name")));
-        row(ui, &t, tl!("Location"), |ui| {
-            let r = ui.small_button("…");
-            reg.add("export.location.browse", r.rect, "Choose folder");
-            pick_folder = r.clicked();
-            text(ui, &mut reg, "export.location", &mut ex.location, tl!("Folder"));
-        });
+        if app.hooks.android_private_export_path.is_some() {
+            row(ui, &t, tl!("Location"), |ui| {
+                let r = ui.label("MediaStore");
+                reg.add("export.location", r.rect, "MediaStore");
+            });
+        } else {
+            row(ui, &t, tl!("Location"), |ui| {
+                let r = ui.small_button("…");
+                reg.add("export.location.browse", r.rect, "Choose folder");
+                pick_folder = r.clicked();
+                text(ui, &mut reg, "export.location", &mut ex.location, tl!("Folder"));
+            });
+        }
         // Preset: favourites, then every preset by category, then More presets…
         row(ui, &t, tl!("Preset"), |ui| {
             let r =
@@ -1006,21 +1022,36 @@ fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq_id:
     reg.add("export.button", go, "Export");
     reg.flush(app);
     if resp.clicked() {
-        let r = app.session.execute("file.exportMedia", export_params(app));
-        match r {
-            Ok(v) => app.ui.status = tlf!("Exporting {path}", path = v["path"].as_str().unwrap_or("")),
-            Err(e) => app.ui.status = e.to_string(),
+        if app.hooks.android_private_export_path.is_some() {
+            app.android_export_started();
+        }
+        match export_params(app) {
+            Ok(params) => match app.session.execute("file.exportMedia", params) {
+                Ok(v) => {
+                    app.ui.status = if app.hooks.android_private_export_path.is_some() {
+                        "Export started. The finished file will appear in MediaStore.".into()
+                    } else {
+                        tlf!("Exporting {path}", path = v["path"].as_str().unwrap_or(""))
+                    }
+                }
+                Err(e) => app.ui.status = e.to_string(),
+            },
+            Err(e) => app.ui.status = e,
         }
     }
     if qresp.clicked() {
-        let mut p = export_params(app);
-        if app.ui.export.preset != CUSTOM {
-            // the queue shows which preset an item came from
-            p["preset"] = json!(app.ui.export.preset);
-        }
-        match app.session.execute("export.queue.add", p) {
-            Ok(_) => app.ui.status = tl!("Added to the export queue").into(),
-            Err(e) => app.ui.status = e.to_string(),
+        match export_params(app) {
+            Ok(mut p) => {
+                if app.ui.export.preset != CUSTOM {
+                    // the queue shows which preset an item came from
+                    p["preset"] = json!(app.ui.export.preset);
+                }
+                match app.session.execute("export.queue.add", p) {
+                    Ok(_) => app.ui.status = tl!("Added to the export queue").into(),
+                    Err(e) => app.ui.status = e.to_string(),
+                }
+            }
+            Err(e) => app.ui.status = e,
         }
     }
 }
@@ -1255,6 +1286,9 @@ pub fn quick_export(app: &mut FilmcraftApp, ctx: &egui::Context, anchor: egui::P
     let mut reg = Reg::default();
     let mut go = false;
     let mut close = false;
+    let android_private_export = app.hooks.android_private_export_path.is_some();
+    let initial_quick_path = app.ui.export.quick_path.clone();
+    let mut quick_file_name = std::path::Path::new(&initial_quick_path).file_name().and_then(|name| name.to_str()).unwrap_or("Export.mp4").to_string();
     let q = &mut app.ui.export;
     let area = egui::Area::new(egui::Id::new("quick-export")).order(egui::Order::Foreground).fixed_pos(anchor).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -1267,8 +1301,13 @@ pub fn quick_export(app: &mut FilmcraftApp, ctx: &egui::Context, anchor: egui::P
                     close = r.clicked();
                 });
             });
-            ui.label(egui::RichText::new(tl!("File Name & Location")).color(t.text_dim).size(11.5));
-            let r = ui.add(egui::TextEdit::singleline(&mut q.quick_path).desired_width(f32::INFINITY));
+            let location_label = if android_private_export { tl!("File Name") } else { tl!("File Name & Location") };
+            ui.label(egui::RichText::new(location_label).color(t.text_dim).size(11.5));
+            let r = if android_private_export {
+                ui.add(egui::TextEdit::singleline(&mut quick_file_name).desired_width(f32::INFINITY))
+            } else {
+                ui.add(egui::TextEdit::singleline(&mut q.quick_path).desired_width(f32::INFINITY))
+            };
             reg.add("quickExport.path", r.rect, "File Name & Location");
             ui.add_space(4.0);
             ui.label(egui::RichText::new(tl!("Preset")).color(t.text_dim).size(11.5));
@@ -1293,14 +1332,33 @@ pub fn quick_export(app: &mut FilmcraftApp, ctx: &egui::Context, anchor: egui::P
         });
     });
     let clicked_elsewhere = area.response.clicked_elsewhere();
+    if android_private_export && quick_file_name != std::path::Path::new(&initial_quick_path).file_name().and_then(|name| name.to_str()).unwrap_or("Export.mp4")
+    {
+        let parent = std::path::Path::new(&initial_quick_path).parent().unwrap_or_else(|| std::path::Path::new(""));
+        app.ui.export.quick_path = parent.join(&quick_file_name).to_string_lossy().into_owned();
+    }
     // the header click that opened the popup is not a click elsewhere
     let toggled = ctx.data_mut(|d| d.remove_temp::<bool>(egui::Id::new("quick-export-toggled")).unwrap_or(false));
     reg.flush(app);
     if go {
-        let p = json!({"preset": app.ui.export.quick_preset, "path": app.ui.export.quick_path});
-        match app.session.execute("export.quick", p) {
-            Ok(v) => app.ui.status = tlf!("Quick Export: {path}", path = v["path"].as_str().unwrap_or("")),
-            Err(e) => app.ui.status = e.to_string(),
+        if app.hooks.android_private_export_path.is_some() {
+            app.android_export_started();
+        }
+        let requested = app.ui.export.quick_path.clone();
+        let prepared = app.hooks.android_private_export_path.as_mut().map(|prepare| prepare(&requested)).transpose();
+        match prepared {
+            Err(error) => app.ui.status = error,
+            Ok(path) => {
+                let path = path.unwrap_or(requested);
+                let p = json!({"preset": app.ui.export.quick_preset, "path": path});
+                match app.session.execute("export.quick", p) {
+                    Ok(_) if app.hooks.android_private_export_path.is_some() => {
+                        app.ui.status = "Export started. The finished file will appear in MediaStore.".into();
+                    }
+                    Ok(v) => app.ui.status = tlf!("Quick Export: {path}", path = v["path"].as_str().unwrap_or("")),
+                    Err(e) => app.ui.status = e.to_string(),
+                }
+            }
         }
         close = true;
     }

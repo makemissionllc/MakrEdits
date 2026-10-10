@@ -1219,7 +1219,7 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
                 }
             });
         }
-        x += toggle_size + if touch { 2.0 } else { 2.0 };
+        x += toggle_size + 2.0;
     }
     // ----- ruler: markers row · labels · ticks · 2 pt render bar
     let clip = p.with_clip_rect(ruler);
@@ -1804,7 +1804,26 @@ fn apply_two_finger_navigation(app: &mut FilmcraftApp, seq: &Sequence, layout: &
     app.tl.drag = None;
     app.tl.pressed = None;
 
-    let center_x = gesture.center_pos.x.clamp(layout.content.min.x, layout.content.max.x);
+    let min_x = layout.content.min.x;
+    let max_x = layout.content.max.x;
+    let min_y = layout.content.min.y;
+    let max_y = layout.content.max.y;
+    if !min_x.is_finite()
+        || !max_x.is_finite()
+        || max_x < min_x
+        || !min_y.is_finite()
+        || !max_y.is_finite()
+        || max_y < min_y
+        || !layout.pps.is_finite()
+        || layout.pps <= 0.0
+        || !layout.scroll.is_finite()
+        || !layout.split_y.is_finite()
+        || !gesture.center_pos.x.is_finite()
+        || !gesture.center_pos.y.is_finite()
+    {
+        return;
+    }
+    let center_x = gesture.center_pos.x.clamp(min_x, max_x);
     if gesture.zoom_delta.is_finite() && gesture.zoom_delta > 0.0 && (gesture.zoom_delta - 1.0).abs() > 1e-4 {
         let view = &mut app.ui.timeline;
         if !view.target_pps.is_finite() || view.target_pps <= 0.0 {
@@ -1819,18 +1838,23 @@ fn apply_two_finger_navigation(app: &mut FilmcraftApp, seq: &Sequence, layout: &
     if !delta.x.is_finite() && !delta.y.is_finite() {
         return;
     }
-    let max_dx = layout.content.width().max(0.0).min(5_000.0);
-    let max_dy = layout.content.height().max(0.0).min(5_000.0);
+    let max_dx = layout.content.width().clamp(0.0, 5_000.0);
+    let max_dy = layout.content.height().clamp(0.0, 5_000.0);
     let dx = if delta.x.is_finite() { delta.x.clamp(-max_dx, max_dx) } else { 0.0 };
     let dy = if delta.y.is_finite() { delta.y.clamp(-max_dy, max_dy) } else { 0.0 };
     let view = &mut app.ui.timeline;
     if dx != 0.0 && view.target_pps.is_finite() && view.target_pps > 0.0 {
         let limit = max_scroll(seq.duration().seconds(), layout.content.width(), view.target_pps);
-        view.target_scroll = (view.target_scroll - f64::from(dx) / view.target_pps).clamp(0.0, limit);
-        if let Some((anchor, x)) = app.tl.zoom_anchor {
-            app.tl.zoom_anchor = Some((anchor, x - dx));
-        } else {
-            view.scroll = view.target_scroll;
+        if limit.is_finite() && limit >= 0.0 {
+            let scroll = if view.target_scroll.is_finite() { view.target_scroll } else { 0.0 };
+            view.target_scroll = (scroll - f64::from(dx) / view.target_pps).clamp(0.0, limit);
+            if let Some((anchor, x)) = app.tl.zoom_anchor {
+                if anchor.is_finite() && x.is_finite() {
+                    app.tl.zoom_anchor = Some((anchor, x - dx));
+                }
+            } else {
+                view.scroll = view.target_scroll;
+            }
         }
     }
     if dy != 0.0 {
@@ -1839,13 +1863,17 @@ fn apply_two_finger_navigation(app: &mut FilmcraftApp, seq: &Sequence, layout: &
             let available = (layout.split_y - layout.content.min.y).max(0.0);
             let limit = (total - available).max(0.0);
             let current = if view.v_scroll.is_finite() { view.v_scroll } else { 0.0 };
-            view.v_scroll = (current + dy).clamp(0.0, limit);
+            if limit.is_finite() {
+                view.v_scroll = (current - dy).clamp(0.0, limit);
+            }
         } else {
             let total = layout.rows.iter().filter(|row| row.kind == TrackKind::Audio).map(|row| row.rect.height()).sum::<f32>();
             let available = (layout.content.max.y - layout.split_y - DIVIDER_H - MASTER_H).max(0.0);
             let limit = (total - available).max(0.0);
             let current = if view.a_scroll.is_finite() { view.a_scroll } else { 0.0 };
-            view.a_scroll = (current - dy).clamp(0.0, limit);
+            if limit.is_finite() {
+                view.a_scroll = (current - dy).clamp(0.0, limit);
+            }
         }
     }
 }
@@ -2605,5 +2633,56 @@ mod chain_starts_tests {
     #[test]
     fn negative_durations_count_as_zero() {
         assert_eq!(chain_starts(Tick(5), &[Tick(-3), Tick(4)]), vec![Tick(5), Tick(5)]);
+    }
+}
+
+#[cfg(test)]
+mod touch_gesture_tests {
+    use super::{Drag, Layout, Row, apply_two_finger_navigation};
+    use crate::FilmcraftApp;
+    use egui::{Rect, pos2, vec2};
+    use filmcraft_project::TrackId;
+    use filmcraft_project::TrackKind;
+
+    #[test]
+    fn two_finger_pinch_and_drag_zoom_scroll_and_cancel_clip_drag() {
+        let mut session = filmcraft_engine::Session::default();
+        session.execute("file.openDemoProject", serde_json::json!({})).unwrap();
+        let sequence = session.active_sequence().cloned().unwrap();
+        let mut app = FilmcraftApp::new(session);
+        app.ui.timeline.target_scroll = 10.0;
+        app.ui.timeline.v_scroll = 50.0;
+        app.tl.drag = Some(Drag::Scrub);
+
+        let content = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0));
+        let layout = Layout {
+            content,
+            ruler: Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 44.0)),
+            rows: vec![Row { track: TrackId(1), kind: TrackKind::Video, index: 0, rect: Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 300.0)), lane: false }],
+            pps: 40.0,
+            scroll: 10.0,
+            split_y: 200.0,
+        };
+        let gesture = egui::MultiTouchInfo {
+            start_time: 0.0,
+            start_pos: pos2(180.0, 150.0),
+            center_pos: pos2(200.0, 150.0),
+            num_touches: 2,
+            zoom_delta: 2.0,
+            zoom_delta_2d: vec2(2.0, 2.0),
+            rotation_delta: 0.0,
+            translation_delta: vec2(-40.0, 20.0),
+            force: 0.0,
+        };
+
+        apply_two_finger_navigation(&mut app, &sequence, &layout, gesture);
+
+        assert_eq!(app.ui.timeline.target_pps, 80.0);
+        assert!((app.ui.timeline.target_scroll - 10.5).abs() < 1e-9);
+        assert_eq!(app.ui.timeline.v_scroll, 30.0);
+        assert!(app.tl.drag.is_none());
+        assert!(app.tl.touch_gesture);
+        assert_eq!(app.tl.zoom_anchor, Some((15.0, 240.0)));
+        app.stop();
     }
 }

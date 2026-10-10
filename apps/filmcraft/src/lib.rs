@@ -1,43 +1,59 @@
 //! Safe platform startup helpers shared by the app's native entry points.
 
+#[cfg(target_os = "android")]
+#[path = "audio_in.rs"]
+mod android_audio_in;
+#[cfg(target_os = "android")]
+mod android_bridge;
+
 /// Start FilmCraft from Android's native activity lifecycle.
 #[cfg(target_os = "android")]
 pub fn run_android(android_app: android_activity::AndroidApp) {
     filmcraft_ui_egui::crash::install(None);
     use android_activity::WindowManagerFlags;
-    // NativeActivity can otherwise hide the system decorations. Keep status/navigation bars
-    // visible; targetSdk 35+ lays out edge-to-edge, so the UI below also follows content_rect().
+    let bridge = android_bridge::safe_directory(android_app.internal_data_path()).and_then(android_bridge::AndroidBridge::new);
+    // Keep system bars visible while Java publishes their WindowInsets for the UI safe area.
     android_app.set_window_flags(WindowManagerFlags::FORCE_NOT_FULLSCREEN, WindowManagerFlags::FULLSCREEN);
-    let safe_area_app = android_app.clone();
+    let safe_area_bridge = bridge.as_ref().ok().cloned();
     let options = eframe::NativeOptions { android_app: Some(android_app), ..Default::default() };
     let started = eframe::run_native(
         "FilmCraft",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             let mut session = filmcraft_engine::Session::default();
             if let Err(error) = session.execute("file.openDemoProject", serde_json::json!({})) {
                 log::error!("could not open the demo project: {error}");
             }
+            session.voiceover.input = Some(Box::new(android_audio_in::CpalIn::new(&session.prefs.audio_hardware.device_class)));
             let mut app = filmcraft_ui_egui::FilmcraftApp::new(session);
+            match bridge {
+                Ok(bridge) => {
+                    let picker_bridge = bridge.clone();
+                    app.hooks.android_picker_request = Some(Box::new(move |request| picker_bridge.request_picker(request)));
+                    let event_bridge = bridge.clone();
+                    app.hooks.android_take_events = Some(Box::new(move || event_bridge.take_events()));
+                    let microphone_bridge = bridge.clone();
+                    app.hooks.android_request_microphone = Some(Box::new(move || microphone_bridge.request_microphone()));
+                    let notification_bridge = bridge.clone();
+                    app.hooks.android_export_started = Some(Box::new(move || notification_bridge.start_export_notifications()));
+                    let export_bridge = bridge.clone();
+                    app.hooks.android_export_progress = Some(Box::new(move |progress| export_bridge.report_exports(progress)));
+                    app.hooks.android_private_export_path = Some(Box::new(move |path| bridge.private_export_path(path)));
+                }
+                Err(error) => {
+                    app.ui.status = format!("Android file picker and export support could not start: {error}");
+                    log::error!("Android bridge unavailable: {error}");
+                }
+            }
             app.hooks.safe_area_insets = Some(Box::new(move |size, pixels_per_point| {
                 if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 || !size.x.is_finite() || !size.y.is_finite() {
                     return [0.0; 4];
                 }
-                let width = size.x * pixels_per_point;
-                let height = size.y * pixels_per_point;
-                if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-                    return [0.0; 4];
-                }
-                let rect = safe_area_app.content_rect();
-                if rect.right <= rect.left || rect.bottom <= rect.top {
-                    return [0.0; 4];
-                }
-                [
-                    (rect.left.max(0) as f32 / pixels_per_point).min(size.x),
-                    (rect.top.max(0) as f32 / pixels_per_point).min(size.y),
-                    (width - rect.right as f32).max(0.0) / pixels_per_point,
-                    (height - rect.bottom as f32).max(0.0) / pixels_per_point,
-                ]
+                safe_area_bridge
+                    .as_ref()
+                    .and_then(android_bridge::AndroidBridge::safe_area_insets_px)
+                    .map(|insets| [insets[0] as f32, insets[1] as f32, insets[2] as f32, insets[3] as f32].map(|pixels| pixels / pixels_per_point))
+                    .unwrap_or([0.0, 24.0, 0.0, 24.0])
             }));
             if let Some(render_state) = cc.wgpu_render_state.clone() {
                 app.set_wgpu(render_state);

@@ -48,7 +48,7 @@ val androidSdkDirectory = localProperties.getProperty("sdk.dir")
 val buildFilmcraftRust = tasks.register<Exec>("buildFilmcraftRust") {
     workingDir(filmcraftRoot)
     commandLine(
-        "cargo", "ndk", "-t", "arm64-v8a", "-o", rustLibraries.asFile.absolutePath,
+        "cargo", "ndk", "-t", "arm64-v8a", "-P", "26", "-o", rustLibraries.asFile.absolutePath,
         "build", "--release", "--no-default-features", "-p", "filmcraft-android-entry",
     )
     if (androidSdkDirectory != null) {

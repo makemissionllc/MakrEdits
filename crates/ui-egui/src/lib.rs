@@ -141,6 +141,31 @@ pub struct HostHooks {
     /// Insets for system UI that overlays the native surface, in egui points, ordered left, top,
     /// right, bottom. Android reads the NativeActivity content rectangle each frame.
     pub safe_area_insets: Option<Box<dyn Fn(egui::Vec2, f32) -> [f32; 4]>>,
+    /// Asynchronous Android Storage Access Framework picker request/result bridge.
+    pub android_picker_request: Option<Box<dyn FnMut(&Value) -> Result<(), String>>>,
+    /// Poll and remove Android picker / permission / export errors.
+    pub android_take_events: Option<Box<dyn FnMut() -> Result<Vec<Value>, String>>>,
+    /// Request microphone permission in response to a voice-over recording tap.
+    pub android_request_microphone: Option<Box<dyn FnMut() -> Result<(), String>>>,
+    /// Notify Android that the first export in a queue has started (permission is requested there).
+    pub android_export_started: Option<Box<dyn FnMut() -> Result<(), String>>>,
+    /// Publish the current queue progress to the Android notification and MediaStore bridge.
+    pub android_export_progress: Option<Box<dyn FnMut(&Value) -> Result<(), String>>>,
+    /// Reserve a private app-file output path; Android copies a completed export to MediaStore.
+    pub android_private_export_path: Option<Box<dyn FnMut(&str) -> Result<String, String>>>,
+}
+
+#[derive(Clone, Copy)]
+enum AndroidPickerTarget {
+    Path,
+    Paths,
+}
+
+struct PendingAndroidPicker {
+    request_id: String,
+    command: String,
+    params: Value,
+    target: AndroidPickerTarget,
 }
 
 /// Reads the system appearance (Settings ▸ Appearance ▸ Appearance Mode ▸ Sync with system).
@@ -231,6 +256,40 @@ pub(crate) const EXPORT_SAVE_DIALOGS: [(&str, &str, &str); 7] = [
     ("file.exportSelectionProject", "FilmCraft Project", "fcproj"),
 ];
 
+fn android_picker_mime_types(extensions: &[&str]) -> Vec<String> {
+    let mut mimes = Vec::new();
+    for extension in extensions {
+        let extension = extension.trim_start_matches('.').to_ascii_lowercase();
+        let mime = match extension.as_str() {
+            "mp4" | "m4v" | "mov" => "video/mp4",
+            "webm" => "video/webm",
+            "mkv" => "video/x-matroska",
+            "avi" => "video/x-msvideo",
+            "mp3" => "audio/mpeg",
+            "wav" => "audio/wav",
+            "m4a" | "aac" => "audio/mp4",
+            "flac" => "audio/flac",
+            "ogg" | "oga" => "audio/ogg",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "tif" | "tiff" => "image/tiff",
+            "srt" | "vtt" | "scc" | "mcc" | "stl" | "ttml" | "dfxp" | "xml" | "edl" | "ale" | "otio" | "fcpxml" => "text/*",
+            "json" => "application/json",
+            _ => "application/octet-stream",
+        };
+        if !mimes.iter().any(|candidate| candidate == mime) {
+            mimes.push(mime.to_string());
+        }
+        if mimes.len() >= 48 {
+            return vec!["*/*".into()];
+        }
+    }
+    if mimes.is_empty() { vec!["*/*".into()] } else { mimes }
+}
+
 pub struct FilmcraftApp {
     pub session: Session,
     pub ui: UiState,
@@ -311,6 +370,12 @@ pub struct FilmcraftApp {
     pub workspaces: dock::WorkspacePrefs,
     /// Workspace names and the current one, as last handed to the native menu.
     menu_workspaces: (Vec<String>, String),
+    pending_android_picker: Option<PendingAndroidPicker>,
+    next_android_picker: u64,
+    pending_android_voiceover: Option<Option<u64>>,
+    android_microphone_granted: Option<bool>,
+    android_export_active: bool,
+    android_export_report_time: f64,
 }
 
 pub struct GpuState {
@@ -493,6 +558,12 @@ impl FilmcraftApp {
             workspace_restored: false,
             workspaces,
             menu_workspaces: Default::default(),
+            pending_android_picker: None,
+            next_android_picker: 1,
+            pending_android_voiceover: None,
+            android_microphone_granted: None,
+            android_export_active: false,
+            android_export_report_time: 0.0,
         }
     }
 
@@ -1071,7 +1142,281 @@ impl FilmcraftApp {
         panels::project::view_of(self, panels::project::shown_inst(self)).bin
     }
 
+    fn begin_android_picker(
+        &mut self,
+        mode: &str,
+        multiple: bool,
+        extensions: &[&str],
+        suggested_name: &str,
+        command: &str,
+        params: Value,
+        target: AndroidPickerTarget,
+    ) -> Result<Value, String> {
+        if self.pending_android_picker.is_some() {
+            return Err("Android is already waiting for a file selection".into());
+        }
+        let request_id =
+            format!("{}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()), self.next_android_picker);
+        self.next_android_picker = self.next_android_picker.saturating_add(1);
+        let mime_types = android_picker_mime_types(extensions);
+        let request = json!({
+            "request_id": request_id,
+            "mode": mode,
+            "multiple": multiple,
+            "suggested_name": suggested_name,
+            "extensions": extensions,
+            "mime_types": mime_types,
+        });
+        let Some(send) = self.hooks.android_picker_request.as_mut() else {
+            return Err("Android file picker is unavailable".into());
+        };
+        send(&request)?;
+        self.pending_android_picker = Some(PendingAndroidPicker { request_id, command: command.to_string(), params, target });
+        self.ui.status = if mode == "save" { "Choose where to save the file in Android's picker." } else { "Choose a file in Android's picker." }.into();
+        Ok(Value::Null)
+    }
+
+    fn poll_android_bridge(&mut self, ctx: &egui::Context) {
+        let Some(take_events) = self.hooks.android_take_events.as_mut() else { return };
+        let events = match take_events() {
+            Ok(events) => events,
+            Err(error) => {
+                self.ui.status = format!("Android integration error: {error}");
+                return;
+            }
+        };
+        for event in events {
+            match event.get("kind").and_then(Value::as_str) {
+                Some("picker") => {
+                    let matches = self
+                        .pending_android_picker
+                        .as_ref()
+                        .is_some_and(|pending| event.get("request_id").and_then(Value::as_str) == Some(pending.request_id.as_str()));
+                    if !matches {
+                        continue;
+                    }
+                    let pending = self.pending_android_picker.take();
+                    let error = event.get("error").and_then(Value::as_str).unwrap_or("");
+                    if !error.is_empty() {
+                        self.ui.status = error.to_string();
+                        continue;
+                    }
+                    if let Some(warning) = event.get("warning").and_then(Value::as_str).filter(|warning| !warning.is_empty()) {
+                        self.ui.status = warning.to_string();
+                    }
+                    let paths: Vec<String> = event
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                        .unwrap_or_default();
+                    if let Some(pending) = pending {
+                        self.run_android_picker_action(pending, paths);
+                    }
+                }
+                Some("microphone_permission") => {
+                    let granted = event.get("granted").and_then(Value::as_bool).unwrap_or(false);
+                    self.android_microphone_granted = Some(granted);
+                    if granted {
+                        if let Some(track) = self.pending_android_voiceover.take()
+                            && let Err(error) = panels::voiceover::toggle(self, track)
+                        {
+                            self.ui.status = error;
+                        }
+                    } else {
+                        self.pending_android_voiceover = None;
+                        self.ui.status = "Microphone permission was denied. Voice-over recording did not start; editing is still available.".into();
+                    }
+                }
+                Some("notification_permission") => {
+                    if event.get("granted").and_then(Value::as_bool) == Some(false) {
+                        self.ui.status = "Notification permission was denied. The export will continue without a notification.".into();
+                    }
+                }
+                Some("android_error") => {
+                    if let Some(message) = event.get("message").and_then(Value::as_str) {
+                        self.ui.status = message.to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self.pending_android_picker.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        }
+    }
+
+    fn run_android_picker_action(&mut self, pending: PendingAndroidPicker, paths: Vec<String>) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut params = pending.params;
+        match pending.target {
+            AndroidPickerTarget::Path => {
+                let Some(path) = paths.first() else { return };
+                params["path"] = json!(path);
+            }
+            AndroidPickerTarget::Paths => params["paths"] = json!(paths),
+        }
+        match self.session.execute(&pending.command, params) {
+            Ok(value) => {
+                if let Some(errors) = value.get("errors").and_then(Value::as_array)
+                    && !errors.is_empty()
+                {
+                    self.ui.status = errors.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; ");
+                }
+            }
+            Err(error) => self.ui.status = error.to_string(),
+        }
+    }
+
+    fn android_file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {
+        match id {
+            "file.import" => {
+                let exts: Vec<&str> = filmcraft_media::VIDEO_EXTENSIONS
+                    .iter()
+                    .chain(filmcraft_media::AUDIO_EXTENSIONS)
+                    .chain(filmcraft_media::STILL_EXTENSIONS)
+                    .chain(&["srt", "vtt", "scc", "edl", "xml", "fcpxml", "otio", "aaf", "omf"])
+                    .copied()
+                    .collect();
+                let bin = params.get("bin").cloned().unwrap_or_else(|| json!(self.import_bin().0));
+                self.begin_android_picker("open", true, &exts, "", "file.import", json!({"bin": bin}), AndroidPickerTarget::Paths)
+            }
+            "file.importImageSequence" => self.begin_android_picker(
+                "open",
+                false,
+                filmcraft_media::STILL_EXTENSIONS,
+                "",
+                "file.importImageSequence",
+                json!({}),
+                AndroidPickerTarget::Path,
+            ),
+            "file.saveAs" | "file.save" | "file.saveCopy" => {
+                let suggested =
+                    if id == "file.saveCopy" { format!("{} copy.fcproj", self.session.project.name) } else { format!("{}.fcproj", self.session.project.name) };
+                let command = if id == "file.saveCopy" { "file.saveCopy" } else { "file.saveAs" };
+                self.begin_android_picker("save", false, &["fcproj"], &suggested, command, json!({}), AndroidPickerTarget::Path)
+            }
+            "file.open" => self.begin_android_picker("open", false, &["fcproj"], "", "file.open", json!({}), AndroidPickerTarget::Path),
+            "graphics.newFromFile" => {
+                let exts: Vec<&str> = filmcraft_media::STILL_EXTENSIONS.iter().chain(filmcraft_media::VIDEO_EXTENSIONS).copied().collect();
+                self.begin_android_picker("open", false, &exts, "", id, json!({}), AndroidPickerTarget::Path)
+            }
+            "captions.import" => self.begin_android_picker(
+                "open",
+                false,
+                &["srt", "vtt", "scc", "mcc", "stl", "ttml", "dfxp", "xml"],
+                "",
+                id,
+                json!({}),
+                AndroidPickerTarget::Path,
+            ),
+            "captions.export" => {
+                let name = self.session.state.active_sequence.and_then(|s| self.session.project.item(s)).map(|i| i.name.clone()).unwrap_or_default();
+                let suggested = format!("{}.srt", name.replace(' ', "_"));
+                self.begin_android_picker(
+                    "save",
+                    false,
+                    &["srt", "vtt", "scc", "mcc", "stl", "ttml", "dfxp"],
+                    &suggested,
+                    id,
+                    params.clone(),
+                    AndroidPickerTarget::Path,
+                )
+            }
+            _ => match EXPORT_SAVE_DIALOGS.iter().find(|(command, ..)| *command == id) {
+                Some(&(_, filter, extension)) => self.export_save_dialog(id, filter, extension, params),
+                None => Err(format!("no dialog for {id}")),
+            },
+        }
+    }
+
+    fn report_android_exports(&mut self, ctx: &egui::Context) {
+        if self.hooks.android_export_progress.is_none() {
+            return;
+        }
+        let now = ctx.input(|input| input.time);
+        if now - self.android_export_report_time < 0.75 {
+            return;
+        }
+        self.android_export_report_time = now;
+        let listing = match self.session.execute("export.queue.list", json!({})) {
+            Ok(listing) => listing,
+            Err(error) => {
+                self.ui.status = error.to_string();
+                return;
+            }
+        };
+        let mut items = listing.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+        let queue_jobs: std::collections::HashSet<u64> = items.iter().filter_map(|item| item.get("job").and_then(Value::as_u64)).collect();
+        let mut active = listing.get("running").and_then(Value::as_bool).unwrap_or(false)
+            || items.iter().any(|item| item.get("status").and_then(Value::as_str) == Some("encoding"));
+        for job in &self.session.jobs {
+            if queue_jobs.contains(&job.id) || !(job.label.starts_with("Export ") || job.label.starts_with("Quick Export ")) {
+                continue;
+            }
+            let state = job.to_json();
+            let result = state.get("result").unwrap_or(&Value::Null);
+            let status = if state.get("finished").and_then(Value::as_bool) == Some(true) {
+                if result.get("error").and_then(Value::as_str).is_some() { "failed" } else { "done" }
+            } else {
+                active = true;
+                "encoding"
+            };
+            let path = result.get("path").and_then(Value::as_str).unwrap_or("");
+            items.push(json!({
+                "id": job.id,
+                "job": job.id,
+                "name": std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(&job.label),
+                "path": path,
+                "status": status,
+                "progress": state.get("progress").cloned().unwrap_or(Value::Null),
+            }));
+        }
+        active |= items.iter().any(|item| item.get("status").and_then(Value::as_str) == Some("encoding"));
+        if active
+            && !self.android_export_active
+            && let Some(started) = self.hooks.android_export_started.as_mut()
+            && let Err(error) = started()
+        {
+            self.ui.status = format!("Export started, but Android could not request notifications: {error}");
+        }
+        self.android_export_active = active;
+        let items: Vec<Value> = items
+            .into_iter()
+            .map(|item| {
+                let path = item.get("path").and_then(Value::as_str).unwrap_or("");
+                let name = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or("Export");
+                json!({
+                    "id": item.get("id").cloned().unwrap_or(Value::Null),
+                    "name": name,
+                    "path": path,
+                    "status": item.get("status").cloned().unwrap_or(Value::Null),
+                    "progress": item.get("progress").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+        let report = json!({"running": active, "items": items});
+        if let Some(write) = self.hooks.android_export_progress.as_mut()
+            && let Err(error) = write(&report)
+        {
+            self.ui.status = format!("Export is running, but Android could not update its progress notification: {error}");
+        }
+    }
+
+    pub(crate) fn android_export_started(&mut self) {
+        self.android_export_active = true;
+        if let Some(started) = self.hooks.android_export_started.as_mut()
+            && let Err(error) = started()
+        {
+            self.ui.status = format!("Export started, but Android could not request notifications: {error}");
+        }
+    }
+
     pub fn file_dialog(&mut self, id: &str, params: &Value) -> Result<Value, String> {
+        if self.hooks.android_picker_request.is_some() {
+            return self.android_file_dialog(id, params);
+        }
         match id {
             "file.import" => {
                 let exts: Vec<&str> = filmcraft_media::VIDEO_EXTENSIONS
@@ -1152,9 +1497,6 @@ impl FilmcraftApp {
     /// run the command with that `path` and the rest of `params`.
     fn export_save_dialog(&mut self, id: &str, filter: &str, ext: &str, params: &Value) -> Result<Value, String> {
         filmcraft_engine::find_command(id).map_or(Ok(()), |c| (c.enabled)(&self.session))?;
-        let Some(pick) = self.hooks.pick_save_as.as_mut() else {
-            return Err("no save dialog available: run the command with a `path`".into());
-        };
         // Timelines are named after the sequence; a selection must not suggest the open project's file.
         let sequence = self.session.state.active_sequence.and_then(|s| self.session.project.item(s)).map(|i| i.name.clone());
         let stem = match id {
@@ -1164,6 +1506,14 @@ impl FilmcraftApp {
         };
         let stem: String = stem.chars().map(|c| if matches!(c, '/' | '\\') || c.is_control() { '-' } else { c }).collect();
         let stem = if stem.trim().is_empty() { "Untitled".to_string() } else { stem };
+        let suggested = format!("{stem}.{ext}");
+        if self.hooks.android_picker_request.is_some() {
+            let p = params.as_object().cloned().unwrap_or_default();
+            return self.begin_android_picker("save", false, &[ext], &suggested, id, Value::Object(p), AndroidPickerTarget::Path);
+        }
+        let Some(pick) = self.hooks.pick_save_as.as_mut() else {
+            return Err("no save dialog available: run the command with a `path`".into());
+        };
         let Some(path) = pick(filter, &[ext], &format!("{stem}.{ext}")) else { return Ok(Value::Null) };
         let mut p = params.as_object().cloned().unwrap_or_default();
         p.insert("path".into(), json!(path));
@@ -1396,6 +1746,8 @@ impl FilmcraftApp {
         self.auto.begin_frame();
         self.frames.set_context(&ctx);
         self.session.poll_persistence();
+        self.poll_android_bridge(&ctx);
+        self.report_android_exports(&ctx);
         panels::trim_monitor::advance(self, &ctx);
         if self.session.persistence.is_some() && self.session.is_dirty() {
             // Keep polling the auto-save worker (status, "also save the project" results).
@@ -1449,7 +1801,7 @@ impl FilmcraftApp {
             egui::pos2(viewport.min.x + left, viewport.min.y + top),
             egui::pos2((viewport.max.x - right).max(viewport.min.x + left), (viewport.max.y - bottom).max(viewport.min.y + top)),
         );
-        let header_h = if self.ui.show_header { if cfg!(target_os = "android") { 52.0 } else { 38.0 } } else { 0.0 };
+        let header_h = if self.ui.show_header { if cfg!(target_os = "android") { 96.0 } else { 38.0 } } else { 0.0 };
         let header = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), header_h));
         if self.ui.show_header {
             header::show(self, ui, header);
@@ -1912,6 +2264,47 @@ mod clipboard_key_tests {
         assert_eq!(events.len(), 3);
         assert!(matches!(events[0], Event::Text(_)));
         assert!(matches!(events[1], Event::Copy));
+    }
+}
+
+#[cfg(test)]
+mod android_picker_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn open_project_waits_for_android_picker_and_uses_its_result() {
+        let mut session = Session::default();
+        session.execute("file.openDemoProject", json!({})).unwrap();
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("filmcraft-android-picker-{unique}.fcproj"));
+        session.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+        let saved_name = session.project.name.clone();
+        let mut app = FilmcraftApp::new(session);
+        std::sync::Arc::make_mut(&mut app.session.project).name = "Unsaved edit".into();
+
+        let request = Rc::new(RefCell::new(None));
+        let captured = request.clone();
+        app.hooks.android_picker_request = Some(Box::new(move |value| {
+            *captured.borrow_mut() = Some(value.clone());
+            Ok(())
+        }));
+        app.file_dialog("file.open", &json!({})).unwrap();
+        let request = request.borrow().clone().unwrap();
+        assert_eq!(request["mode"], "open");
+        assert_eq!(request["extensions"][0], "fcproj");
+        assert_eq!(app.session.project.name, "Unsaved edit", "the project stays open while Android shows its picker");
+
+        let event = json!({"kind":"picker", "request_id":request["request_id"], "paths":[path.to_string_lossy()], "error":""});
+        let events = Rc::new(RefCell::new(Some(vec![event])));
+        let pending_events = events.clone();
+        app.hooks.android_take_events = Some(Box::new(move || Ok(pending_events.borrow_mut().take().unwrap_or_default())));
+        app.poll_android_bridge(&egui::Context::default());
+
+        assert_eq!(app.session.project.name, saved_name);
+        assert!(app.pending_android_picker.is_none());
+        let _ = std::fs::remove_file(path);
     }
 }
 

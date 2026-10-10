@@ -337,7 +337,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     let (zr, rr, wr) = if compact_controls {
         let wrench_w = if touch { 44.0 } else { 22.0 };
         let res_w = if touch { 74.0 } else { 62.0 };
-        let gap = if touch { 6.0 } else { 6.0 };
+        let gap = 6.0;
         let rr_x = row2.max.x - wrench_w - gap - res_w;
         let zoom_w = (rr_x - gap - row2.min.x).max(if touch { 44.0 } else { 52.0 }).min(if touch { 78.0 } else { 70.0 });
         (
@@ -757,7 +757,7 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
         let mut content_ui = ui.new_child(egui::UiBuilder::new().max_rect(row));
         egui::ScrollArea::horizontal()
             .id_salt((prefix, "transport-touch"))
-            .scroll_bar_visibility(egui::ScrollBarVisibility::AlwaysHidden)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .auto_shrink([false, false])
             .show(&mut content_ui, |content| {
                 content.spacing_mut().item_spacing.x = 4.0;

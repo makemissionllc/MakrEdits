@@ -199,10 +199,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
                 continue;
             }
             let hr = Rect::from_center_size(c, vec2(11.0, 11.0));
-            let resp = ui.interact(hr, egui::Id::new(("lane-kf", r.track.0, i)), Sense::click_and_drag());
+            let keyframe_hit = crate::widgets::touch_hit_rect(hr).intersect(vis);
+            let resp = ui.interact(keyframe_hit, egui::Id::new(("lane-kf", r.track.0, i)), Sense::click_and_drag());
             let hot = resp.hovered() || dragging.is_some();
             icons::paint(&p, Rect::from_center_size(c, vec2(9.0, 9.0)), Icon::Keyframe, if hot { Color32::WHITE } else { LANE_COL });
-            app.auto.add(&format!("timeline.track.{label}.lane.kf.{i}"), hr, &format!("{name} keyframe {v:.1}"));
+            app.auto.add(&format!("timeline.track.{label}.lane.kf.{i}"), keyframe_hit, &format!("{name} keyframe {v:.1}"));
             if resp.drag_started()
                 && let Some(pp) = pointer
             {

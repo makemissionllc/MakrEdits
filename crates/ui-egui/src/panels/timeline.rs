@@ -25,7 +25,7 @@ use crate::theme::Tokens;
 use super::timeline_hit::{EdgeKind, Grab, edge_geometry, grab_at};
 pub use super::timeline_hit::{Hit, ROLL_PX, hit, selection_trim_kind};
 
-const TOP_H: f32 = 58.0; // timecode + toolbar (left) / ruler (right)
+const TOP_H: f32 = if cfg!(target_os = "android") { 84.0 } else { 58.0 }; // timecode + toolbar (left) / ruler (right)
 const RULER_H: f32 = 44.0;
 const SCROLLBAR_H: f32 = 17.0;
 const DIVIDER_H: f32 = 5.0;
@@ -38,6 +38,8 @@ pub struct TlState {
     pub drag: Option<Drag>,
     /// What the primary button went down on in the Timeline (#259); see [`Pressed`].
     pub pressed: Option<Pressed>,
+    /// Ignore the final one-finger release after a two-finger navigation gesture.
+    touch_gesture: bool,
     /// Last layout (for hit-testing from the control channel).
     pub layout: Option<Layout>,
     /// Snap indicator x (screen) this frame.
@@ -230,6 +232,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         empty_state(app, ui, rect);
         return;
     };
+    if cfg!(target_os = "android") {
+        app.ui.timeline.header_w = app.ui.timeline.header_w.max(390.0);
+        app.ui.timeline.video_track_h = app.ui.timeline.video_track_h.max(64.0);
+        app.ui.timeline.audio_track_h = app.ui.timeline.audio_track_h.max(64.0);
+    }
     let rate = seq.settings.frame_rate;
     let dt = ctx.input(|i| i.stable_dt).min(0.05) as f64;
     let header_w = app.ui.timeline.header_w;
@@ -975,6 +982,7 @@ fn patch_button(ui: &mut egui::Ui, r: Rect, clip: Rect, label: &str, on: bool, s
 #[allow(clippy::too_many_arguments)]
 fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows: &[Row], rect: Rect, vclip: Rect, aclip: Rect, t: &Tokens) {
     let hw = app.ui.timeline.header_w;
+    let touch = cfg!(target_os = "android");
     let tg = app.session.targeting();
     let mut actions: Vec<(String, Value)> = Vec::new();
     let mut vo_action = None;
@@ -990,18 +998,24 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
         p.rect_filled(hrect, 0.0, t.tl_header_bg);
         p.line_segment([pos2(hrect.min.x, hrect.max.y - 0.5), pos2(hrect.max.x, hrect.max.y - 0.5)], Stroke::new(1.0, t.separator));
         let label = format!("{}{}", if r.kind == TrackKind::Video { "V" } else { "A" }, r.index + 1);
-        let btn_rect = |x0: f32| Rect::from_min_max(pos2(hrect.min.x + x0, hrect.min.y + 1.0), pos2(hrect.min.x + x0 + 24.0, hrect.max.y - 2.0));
+        let btn_rect = |x0: f32| {
+            if touch {
+                Rect::from_min_size(pos2(hrect.min.x + x0, hrect.min.y), vec2(44.0, 44.0))
+            } else {
+                Rect::from_min_max(pos2(hrect.min.x + x0, hrect.min.y + 1.0), pos2(hrect.min.x + x0 + 24.0, hrect.max.y - 2.0))
+            }
+        };
         // 1. source patch (absent when unpatched)
         let patched = if r.kind == TrackKind::Video { tg.video_dest == Some(r.track) } else { tg.audio_dest == Some(r.track) };
-        let pr = btn_rect(13.0);
+        let pr = btn_rect(if touch { 8.0 } else { 13.0 });
         app.auto.add(&format!("timeline.track.{label}.sourcePatch"), pr, "Source patch");
         if patch_button(ui, pr, visible, &label, patched, false, egui::Id::new(("patch", r.track.0)), t).clicked() {
             actions.push(("timeline.setTargeting".into(), json!({"track": r.track.0, "sourcePatch": !patched})));
         }
         // 2. track lock
-        let small = |x: f32, y: f32| Rect::from_center_size(pos2(hrect.min.x + x, y), vec2(18.0, 18.0));
-        let upper_y = hrect.min.y + (16.0f32).min(hrect.height() / 2.0);
-        let lock_r = small(49.0, hrect.center().y);
+        let small = |x: f32, y: f32| Rect::from_center_size(pos2(hrect.min.x + x, y), vec2(if touch { 44.0 } else { 18.0 }, if touch { 44.0 } else { 18.0 }));
+        let upper_y = if touch { hrect.min.y + 22.0 } else { hrect.min.y + (16.0f32).min(hrect.height() / 2.0) };
+        let lock_r = small(if touch { 76.0 } else { 49.0 }, if touch { upper_y } else { hrect.center().y });
         let lresp = crate::widgets::icon_toggle(
             ui,
             lock_r.intersect(visible),
@@ -1021,13 +1035,13 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
         }
         // 3. target
         let targeted = tg.targeted.contains(&r.track);
-        let trr = btn_rect(61.0);
+        let trr = btn_rect(if touch { 100.0 } else { 61.0 });
         app.auto.add(&format!("timeline.track.{label}.target"), trr, "Toggle track targeting");
         if patch_button(ui, trr, visible, &label, targeted, true, egui::Id::new(("target", r.track.0)), t).clicked() {
             actions.push(("timeline.setTargeting".into(), json!({"track": r.track.0, "targeted": !targeted})));
         }
         // 4. upper line icons
-        let mut x = 102.0;
+        let mut x = if touch { 168.0 } else { 102.0 };
         let sr = small(x, upper_y);
         let sresp =
             crate::widgets::icon_toggle(ui, sr.intersect(visible), Icon::SyncLock, tr.sync_lock, t, egui::Id::new(("syncLock", r.track.0)), Some(t.text_dim));
@@ -1035,7 +1049,7 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
         if sresp.clicked() {
             actions.push(("timeline.setTrack".into(), json!({"track": r.track.0, "syncLock": !tr.sync_lock})));
         }
-        x += 24.0;
+        x += if touch { 46.0 } else { 24.0 };
         if r.kind == TrackKind::Video {
             let er = small(x, upper_y);
             let eresp = crate::widgets::icon_toggle(
@@ -1066,7 +1080,10 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
             if mresp.clicked() {
                 actions.push(("timeline.setTrack".into(), json!({"track": r.track.0, "muted": !tr.muted})));
             }
-            let s2 = Rect::from_center_size(pos2(hrect.min.x + x + 20.0, upper_y), vec2(14.0, 14.0));
+            let s2 = Rect::from_center_size(
+                pos2(hrect.min.x + x + if touch { 46.0 } else { 20.0 }, upper_y),
+                vec2(if touch { 44.0 } else { 14.0 }, if touch { 44.0 } else { 14.0 }),
+            );
             let so = crate::widgets::letter_toggle(
                 ui,
                 s2.intersect(visible),
@@ -1080,16 +1097,17 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
             if so.clicked() {
                 actions.push(("timeline.setTrack".into(), json!({"track": r.track.0, "solo": !tr.solo})));
             }
-            let vr = small(x + 42.0, upper_y);
+            let vr = small(x + if touch { 92.0 } else { 42.0 }, upper_y);
             if let Some(a) = super::voiceover::header_button(app, ui, r.track, vr, visible, &label, t) {
                 vo_action = Some(a);
             }
-            let kr = small(x + 64.0, upper_y);
+            let kr = small(x + if touch { 138.0 } else { 64.0 }, upper_y);
             super::timeline_automation::header_button(app, ui, seq, r, kr, visible, &label, t);
         }
         // 5. name on the lower line (or inline when short)
-        if hrect.height() >= 40.0 {
-            p.text(pos2(hrect.min.x + 94.0, hrect.min.y + 34.0), Align2::LEFT_CENTER, &tr.name, Tokens::ui(11.0), t.text_dim);
+        if hrect.height() >= if touch { 60.0 } else { 40.0 } {
+            let (name_x, name_y) = if touch { (hrect.min.x + 8.0, hrect.min.y + 55.0) } else { (hrect.min.x + 94.0, hrect.min.y + 34.0) };
+            p.text(pos2(name_x, name_y), Align2::LEFT_CENTER, &tr.name, Tokens::ui(11.0), t.text_dim);
         }
         // resize track height by dragging the header's bottom edge
         let edge = Rect::from_min_max(pos2(hrect.min.x, hrect.max.y - 3.0), pos2(hrect.max.x, hrect.max.y + 2.0)).intersect(visible);
@@ -1101,7 +1119,7 @@ fn draw_headers(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, rows:
             if eresp.dragged() {
                 let d = eresp.drag_delta().y * if r.kind == TrackKind::Video { -1.0 } else { 1.0 };
                 let h = if r.kind == TrackKind::Video { &mut app.ui.timeline.video_track_h } else { &mut app.ui.timeline.audio_track_h };
-                *h = (*h + d).clamp(22.0, 220.0);
+                *h = (*h + d).clamp(if touch { 64.0 } else { 22.0 }, 220.0);
             }
         }
         let resp = ui.interact(
@@ -1149,6 +1167,8 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
     app.auto.add("timeline.timecode", tc_rect, &tc);
     // toolbar: 30 × 30 buttons, "on" = #4b4b4b fill
     let mut x = rect.min.x + 12.0;
+    let touch = cfg!(target_os = "android");
+    let toggle_size = if touch { 44.0 } else { 28.0 };
     let y = rect.min.y + 26.0;
     let toggles: [(Icon, &str, bool, bool, &str); 6] = [
         (Icon::Nest, "nest", !app.session.state.sequences_as_clips, true, tl!("Insert and overwrite sequences as nests or individual clips")),
@@ -1159,15 +1179,15 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
         (Icon::Wrench, "settings", false, false, tl!("Timeline Display Settings")),
     ];
     for (icon, key, on, toggle, tip) in toggles {
-        let r = Rect::from_min_size(pos2(x, y), vec2(28.0, 28.0));
-        let resp = ui.interact(r, egui::Id::new(("tl-toggle", key)), Sense::click()).on_hover_text(tip);
+        let r = Rect::from_min_size(pos2(x, y), vec2(toggle_size, toggle_size));
+        let resp = ui.interact(crate::widgets::touch_hit_rect(r), egui::Id::new(("tl-toggle", key)), Sense::click()).on_hover_text(tip);
         app.auto.add(&format!("timeline.toggle.{key}"), r, tip);
         if toggle && on {
             p.rect_filled(r, 4.0, t.pressed);
         } else if resp.hovered() {
             p.rect_filled(r, 4.0, t.hover);
         }
-        icons::paint(&p, r.shrink(7.0), icon, if toggle && on { t.text } else { t.text_dim });
+        icons::paint(&p, r.shrink(if touch { 11.0 } else { 7.0 }), icon, if toggle && on { t.text } else { t.text_dim });
         if resp.clicked() {
             let _ = match key {
                 "nest" => app.session.execute("sequence.nestSequences", json!({})),
@@ -1199,7 +1219,7 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
                 }
             });
         }
-        x += 30.0;
+        x += toggle_size + if touch { 2.0 } else { 2.0 };
     }
     // ----- ruler: markers row · labels · ticks · 2 pt render bar
     let clip = p.with_clip_rect(ruler);
@@ -1779,9 +1799,72 @@ fn wheel_input(ctx: &egui::Context) -> WheelInput {
     })
 }
 
+fn apply_two_finger_navigation(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, gesture: egui::MultiTouchInfo) {
+    app.tl.touch_gesture = true;
+    app.tl.drag = None;
+    app.tl.pressed = None;
+
+    let center_x = gesture.center_pos.x.clamp(layout.content.min.x, layout.content.max.x);
+    if gesture.zoom_delta.is_finite() && gesture.zoom_delta > 0.0 && (gesture.zoom_delta - 1.0).abs() > 1e-4 {
+        let view = &mut app.ui.timeline;
+        if !view.target_pps.is_finite() || view.target_pps <= 0.0 {
+            view.target_pps = 0.05;
+        }
+        let anchor = layout.tick_at(center_x).seconds();
+        view.target_pps = (view.target_pps * f64::from(gesture.zoom_delta)).clamp(0.05, 24_000.0);
+        app.tl.zoom_anchor = Some((anchor, center_x));
+    }
+
+    let delta = gesture.translation_delta;
+    if !delta.x.is_finite() && !delta.y.is_finite() {
+        return;
+    }
+    let max_dx = layout.content.width().max(0.0).min(5_000.0);
+    let max_dy = layout.content.height().max(0.0).min(5_000.0);
+    let dx = if delta.x.is_finite() { delta.x.clamp(-max_dx, max_dx) } else { 0.0 };
+    let dy = if delta.y.is_finite() { delta.y.clamp(-max_dy, max_dy) } else { 0.0 };
+    let view = &mut app.ui.timeline;
+    if dx != 0.0 && view.target_pps.is_finite() && view.target_pps > 0.0 {
+        let limit = max_scroll(seq.duration().seconds(), layout.content.width(), view.target_pps);
+        view.target_scroll = (view.target_scroll - f64::from(dx) / view.target_pps).clamp(0.0, limit);
+        if let Some((anchor, x)) = app.tl.zoom_anchor {
+            app.tl.zoom_anchor = Some((anchor, x - dx));
+        } else {
+            view.scroll = view.target_scroll;
+        }
+    }
+    if dy != 0.0 {
+        if gesture.center_pos.y < layout.split_y {
+            let total = layout.rows.iter().filter(|row| row.kind == TrackKind::Video).map(|row| row.rect.height()).sum::<f32>();
+            let available = (layout.split_y - layout.content.min.y).max(0.0);
+            let limit = (total - available).max(0.0);
+            let current = if view.v_scroll.is_finite() { view.v_scroll } else { 0.0 };
+            view.v_scroll = (current + dy).clamp(0.0, limit);
+        } else {
+            let total = layout.rows.iter().filter(|row| row.kind == TrackKind::Audio).map(|row| row.rect.height()).sum::<f32>();
+            let available = (layout.content.max.y - layout.split_y - DIVIDER_H - MASTER_H).max(0.0);
+            let limit = (total - available).max(0.0);
+            let current = if view.a_scroll.is_finite() { view.a_scroll } else { 0.0 };
+            view.a_scroll = (current - dy).clamp(0.0, limit);
+        }
+    }
+}
+
 fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &Layout, rect: Rect) {
     let ctx = ui.ctx().clone();
     let area = Rect::from_min_max(pos2(layout.content.min.x, layout.ruler.min.y), layout.content.max);
+    if let Some(gesture) = ctx.input(|i| i.multi_touch()).filter(|gesture| rect.contains(gesture.center_pos)) {
+        apply_two_finger_navigation(app, seq, layout, gesture);
+        return;
+    }
+    if app.tl.touch_gesture {
+        app.tl.drag = None;
+        app.tl.pressed = None;
+        if !ctx.input(|i| i.pointer.any_down()) {
+            app.tl.touch_gesture = false;
+        }
+        return;
+    }
     let resp = ui.interact(area, egui::Id::new("timeline-area"), Sense::click_and_drag());
     let pos = resp.hover_pos().or(resp.interact_pointer_pos());
     let mods = ctx.input(|i| i.modifiers);

@@ -546,7 +546,7 @@ pub fn draw_group_chrome(
             None => actions.push(DockAction::Activate(tab.panel)),
         };
         let active_at = tabs.iter().position(|tab| tab.active).unwrap_or(0);
-        let text_y = strip.min.y + 16.0;
+        let text_y = strip.center().y;
         // Which tabs fit. The active tab is always shown: tabs before it are left out until it
         // fits, then as many after it as there is room for. Tabs that are left out are reached
         // through the » list at the right end of the strip.
@@ -554,7 +554,8 @@ pub fn draw_group_chrome(
             .iter()
             .map(|tab| {
                 let label = painter.layout_no_wrap(tab.title.clone(), Tokens::ui(12.0), t.tab_text).size().x;
-                label + 16.0 + if tab.active { 20.0 } else { 0.0 } + if tab.active && tab.seq.is_some() { 16.0 } else { 0.0 }
+                (label + 16.0 + if tab.active { 20.0 } else { 0.0 } + if tab.active && tab.seq.is_some() { 16.0 } else { 0.0 })
+                    .max(if cfg!(target_os = "android") { 44.0 } else { 0.0 })
             })
             .collect();
         let span = |from: usize, to: usize| widths.get(from..=to).map_or(0.0, |w| w.iter().sum::<f32>() + 8.0 * w.len() as f32);
@@ -570,7 +571,13 @@ pub fn draw_group_chrome(
             last += 1;
         }
         let list_id = egui::Id::new(("tab-list", g.path.clone()));
-        let more = (!all_fit).then(|| Rect::from_min_size(pos2(strip.max.x - 22.0, strip.min.y + 6.0), vec2(18.0, 20.0)));
+        let more = (!all_fit).then(|| {
+            if cfg!(target_os = "android") {
+                Rect::from_min_size(pos2(strip.max.x - 48.0, strip.min.y), vec2(44.0, strip.height()))
+            } else {
+                Rect::from_min_size(pos2(strip.max.x - 22.0, strip.min.y + 6.0), vec2(18.0, 20.0))
+            }
+        });
         let mut list_opened = false;
         if let Some(r) = more {
             let resp = ui.interact(r, egui::Id::new(("tab-overflow", g.path.clone())), Sense::click());
@@ -621,8 +628,10 @@ pub fn draw_group_chrome(
             if let Some(id) = tab.seq.filter(|_| is_active) {
                 // × closes the sequence's tab (the sequence stays in the project)
                 let cr = Rect::from_center_size(pos2(tab_rect.min.x + 10.0, text_y), vec2(8.0, 8.0));
-                let cresp = ui.interact(cr.expand(4.0), egui::Id::new(("tab-close", g.path.clone(), id)), Sense::click());
-                reg.add(&format!("timeline.tab.{id}.close"), cr.expand(4.0), "close sequence");
+                let close_hit =
+                    if cfg!(target_os = "android") { Rect::from_center_size(cr.center(), vec2(44.0, 44.0)).intersect(tab_rect) } else { cr.expand(4.0) };
+                let cresp = ui.interact(close_hit, egui::Id::new(("tab-close", g.path.clone(), id)), Sense::click());
+                reg.add(&format!("timeline.tab.{id}.close"), close_hit, "close sequence");
                 let cc = if cresp.hovered() { t.tab_text_active } else { t.tab_text };
                 painter.line_segment([cr.left_top(), cr.right_bottom()], Stroke::new(1.2, cc));
                 painter.line_segment([cr.right_top(), cr.left_bottom()], Stroke::new(1.2, cc));
@@ -633,12 +642,14 @@ pub fn draw_group_chrome(
             }
             if is_active {
                 let mr = Rect::from_center_size(pos2(label_x + label_w + 12.0, text_y), vec2(12.0, 10.0));
-                let mresp = ui.interact(mr.expand(3.0), egui::Id::new(("tab-menu", g.path.clone())), Sense::click());
-                reg.add(&format!("panel.menu.{}", p.id()), mr, "panel menu");
+                let menu_hit =
+                    if cfg!(target_os = "android") { Rect::from_center_size(mr.center(), vec2(44.0, 44.0)).intersect(tab_rect) } else { mr.expand(3.0) };
+                let mresp = ui.interact(menu_hit, egui::Id::new(("tab-menu", g.path.clone())), Sense::click());
+                reg.add(&format!("panel.menu.{}", p.id()), menu_hit, "panel menu");
                 let mc = if mresp.hovered() { t.tab_text_active } else { t.tab_text };
                 icons::paint(&painter, Rect::from_center_size(mr.center(), vec2(16.0, 16.0)), Icon::Hamburger, mc);
                 // 1 pt underline spanning label + ≡, 23 pt below the frame top
-                let uy = strip.min.y + 23.0;
+                let uy = strip.max.y - if cfg!(target_os = "android") { 4.0 } else { 9.0 };
                 painter.line_segment([pos2(label_x, uy), pos2(mr.max.x, uy)], Stroke::new(1.0, t.tab_text_active));
                 if mresp.clicked() {
                     actions.push(DockAction::PanelMenu(*p, mr.left_bottom()));

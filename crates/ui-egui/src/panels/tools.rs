@@ -10,7 +10,7 @@ use crate::state::Tool;
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let mut y = rect.min.y + 4.0;
-    let size = 32.0;
+    let size = if cfg!(target_os = "android") { 44.0 } else { 32.0 };
     let held_id = egui::Id::new("tools-held");
     if ui.input(|i| i.pointer.any_pressed()) {
         ui.data_mut(|d| d.remove::<egui::Id>(held_id));
@@ -29,11 +29,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         let active = group.contains(&app.ui.tool);
         if active {
-            ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(26.0, 26.0)), 4.0, t.accent);
+            let active_size = if cfg!(target_os = "android") { 40.0 } else { 26.0 };
+            ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(active_size, active_size)), 4.0, t.accent);
         } else if resp.hovered() {
             ui.painter().rect_filled(r, 4.0, t.hover);
         }
-        icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(17.0, 17.0)), current.icon(), if active { egui::Color32::WHITE } else { t.icon });
+        let icon_size = if cfg!(target_os = "android") { 22.0 } else { 17.0 };
+        icons::paint(
+            ui.painter(),
+            Rect::from_center_size(r.center(), vec2(icon_size, icon_size)),
+            current.icon(),
+            if active { egui::Color32::WHITE } else { t.icon },
+        );
         if group.len() > 1 {
             let c = r.right_bottom() - vec2(3.0, 3.0);
             ui.painter().add(egui::Shape::convex_polygon(vec![c, c - vec2(5.0, 0.0), c - vec2(0.0, 5.0)], t.text_dim, egui::Stroke::NONE));

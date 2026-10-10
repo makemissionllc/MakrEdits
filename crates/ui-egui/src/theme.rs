@@ -236,7 +236,7 @@ impl Tokens {
             radius: 0.0,
             radius_sm: 4.0,
             gap: 4.0,
-            tab_h: 32.0,
+            tab_h: if cfg!(target_os = "android") { 44.0 } else { 32.0 },
         };
         match kind {
             ThemeKind::Dark => dark,
@@ -477,8 +477,13 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(6.0, 4.0);
-        s.spacing.button_padding = egui::vec2(8.0, 3.0);
-        s.spacing.interact_size.y = 24.0;
+        if cfg!(target_os = "android") {
+            s.spacing.button_padding = egui::vec2(12.0, 8.0);
+            s.spacing.interact_size = egui::vec2(44.0, 44.0);
+        } else {
+            s.spacing.button_padding = egui::vec2(8.0, 3.0);
+            s.spacing.interact_size.y = 24.0;
+        }
         s.spacing.menu_margin = egui::Margin::same(4);
         s.text_styles.insert(TextStyle::Body, FontId::new(12.0, FontFamily::Proportional));
         s.text_styles.insert(TextStyle::Button, FontId::new(12.0, FontFamily::Proportional));

@@ -138,6 +138,9 @@ pub struct HostHooks {
     /// whose Wayland compositor sends no theme to winit). Without it, or without an answer, Auto
     /// uses `egui::Context::system_theme`.
     pub system_theme: Option<SystemThemeFn>,
+    /// Insets for system UI that overlays the native surface, in egui points, ordered left, top,
+    /// right, bottom. Android reads the NativeActivity content rectangle each frame.
+    pub safe_area_insets: Option<Box<dyn Fn(egui::Vec2, f32) -> [f32; 4]>>,
 }
 
 /// Reads the system appearance (Settings ▸ Appearance ▸ Appearance Mode ▸ Sync with system).
@@ -1431,9 +1434,22 @@ impl FilmcraftApp {
         self.advance_source_playback(&ctx);
         self.scrub_audio(&ctx);
         let t = self.tokens;
-        let full = ui.max_rect();
-        ui.painter().rect_filled(full, 0.0, t.app_bg);
-        let header_h = if self.ui.show_header { 38.0 } else { 0.0 };
+        let viewport = ui.max_rect();
+        ui.painter().rect_filled(viewport, 0.0, t.app_bg);
+        let ppp = ctx.pixels_per_point();
+        let insets = self.hooks.safe_area_insets.as_ref().map(|read| read(viewport.size(), ppp)).unwrap_or([0.0; 4]);
+        let max_x = ((viewport.width() - 1.0).max(0.0)) * 0.5;
+        let max_y = ((viewport.height() - 1.0).max(0.0)) * 0.5;
+        let safe_inset = |value: f32, max: f32| if value.is_finite() { value.clamp(0.0, max) } else { 0.0 };
+        let left = safe_inset(insets[0], max_x);
+        let top = safe_inset(insets[1], max_y);
+        let right = safe_inset(insets[2], max_x);
+        let bottom = safe_inset(insets[3], max_y);
+        let full = egui::Rect::from_min_max(
+            egui::pos2(viewport.min.x + left, viewport.min.y + top),
+            egui::pos2((viewport.max.x - right).max(viewport.min.x + left), (viewport.max.y - bottom).max(viewport.min.y + top)),
+        );
+        let header_h = if self.ui.show_header { if cfg!(target_os = "android") { 52.0 } else { 38.0 } } else { 0.0 };
         let header = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), header_h));
         if self.ui.show_header {
             header::show(self, ui, header);

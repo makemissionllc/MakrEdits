@@ -28,7 +28,12 @@ pub enum Which {
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
-    let controls_h = 28.0 + 24.0 + 36.0;
+    let touch = cfg!(target_os = "android");
+    let compact_controls = touch || rect.width() < 420.0;
+    let control_row_h = if touch { 44.0 } else { 26.0 };
+    let bar_h = 22.0;
+    let transport_h = if touch { 44.0 } else { 32.0 };
+    let controls_h = if compact_controls { 2.0 * control_row_h + bar_h + transport_h + 8.0 } else { 28.0 + 24.0 + 36.0 };
     let video_area = Rect::from_min_max(rect.min + vec2(4.0, 4.0), pos2(rect.max.x - 4.0, rect.max.y - controls_h));
     // the Source monitor's time ruler starts at `origin` (a subclip restricted to its range)
     let mut origin = Tick::ZERO;
@@ -306,7 +311,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     }
 
     // ---- controls row: timecode | zoom | res | wrench | duration
-    let row1 = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.max.y - controls_h + 2.0), vec2(rect.width() - 28.0, 26.0));
+    let row1 = Rect::from_min_size(
+        pos2(rect.min.x + 14.0, rect.max.y - controls_h + 2.0),
+        vec2(rect.width() - 28.0, if compact_controls { control_row_h } else { 26.0 }),
+    );
     let tc = format_time(time, rate, drop_frame, TimeDisplay::Timecode, 48000);
     let tc_rect = Rect::from_min_size(row1.min, vec2(110.0, row1.height()));
     let min = if which == Which::Program { Tick::ZERO } else { origin };
@@ -323,8 +331,26 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     app.auto.add(&format!("{prefix}.timecode"), tc_rect, &tc);
     let dur_tc = format_time(mark_out.map(|o| o + rate.frame_duration()).unwrap_or(duration) - range_start, rate, drop_frame, TimeDisplay::Timecode, 48000);
     ui.painter().text(pos2(row1.max.x, row1.center().y), Align2::RIGHT_CENTER, &dur_tc, Tokens::timecode(), t.text_dim);
-    // zoom + resolution dropdowns centred-ish
-    let zr = Rect::from_min_size(pos2(row1.min.x + 116.0, row1.min.y), vec2(70.0, 24.0));
+    // Keep the time numbers on their own row when the monitor is narrow or touch-sized. The
+    // playback-resolution dropdown otherwise lands over the current/duration timecode.
+    let row2 = Rect::from_min_size(pos2(row1.min.x, row1.max.y + 2.0), vec2(row1.width(), control_row_h));
+    let (zr, rr, wr) = if compact_controls {
+        let wrench_w = if touch { 44.0 } else { 22.0 };
+        let res_w = if touch { 74.0 } else { 62.0 };
+        let gap = if touch { 6.0 } else { 6.0 };
+        let rr_x = row2.max.x - wrench_w - gap - res_w;
+        let zoom_w = (rr_x - gap - row2.min.x).max(if touch { 44.0 } else { 52.0 }).min(if touch { 78.0 } else { 70.0 });
+        (
+            Rect::from_min_size(row2.min, vec2(zoom_w, row2.height())),
+            Rect::from_min_size(pos2(rr_x, row2.min.y), vec2(res_w, row2.height())),
+            Rect::from_min_size(pos2(row2.max.x - wrench_w, row2.min.y), vec2(wrench_w, row2.height())),
+        )
+    } else {
+        let zoom = Rect::from_min_size(pos2(row1.min.x + 116.0, row1.min.y), vec2(70.0, 24.0));
+        let resolution = Rect::from_min_size(pos2(row1.max.x - 196.0, row1.min.y), vec2(62.0, 24.0));
+        let wrench = Rect::from_min_size(pos2(resolution.max.x + 6.0, row1.min.y + 1.0), vec2(22.0, 22.0));
+        (zoom, resolution, wrench)
+    };
     let zoom_label = match mv.zoom {
         None => tl!("Fit").to_string(),
         Some(z) => format!("{}%", (z * 100.0).round() as i32),
@@ -333,9 +359,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     app.auto.add(&format!("{prefix}.zoom"), zr, "Select Zoom Level");
     monitor_view::zoom_menu(app, &zresp, which);
     let res = mv.res;
-    let rr = Rect::from_min_size(pos2(row1.max.x - 196.0, row1.min.y), vec2(62.0, 24.0));
     if which == Which::Source && rr.min.x > zr.max.x + 12.0 {
-        crate::panels::source_drag::controls(app, ui, Rect::from_min_max(pos2(zr.max.x + 6.0, row1.min.y), pos2(rr.min.x - 6.0, row1.min.y + 24.0)));
+        crate::panels::source_drag::controls(app, ui, Rect::from_min_max(pos2(zr.max.x + 6.0, zr.min.y), pos2(rr.min.x - 6.0, zr.max.y)));
     }
     let rresp = crate::widgets::dropdown_text(ui, rr, crate::i18n::t(res.label()), &t, egui::Id::new((prefix, "res")));
     app.auto.add(&format!("{prefix}.resolution"), rr, "Select Playback Resolution");
@@ -346,9 +371,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             }
         }
     });
-    let wr = Rect::from_min_size(pos2(rr.max.x + 6.0, row1.min.y + 1.0), vec2(22.0, 22.0));
-    let wresp = ui.interact(wr, egui::Id::new((prefix, "wrench")), Sense::click());
-    icons::paint(ui.painter(), wr.shrink(4.0), Icon::Wrench, if wresp.hovered() { t.tab_text_active } else { t.icon });
+    let wresp = ui.interact(crate::widgets::touch_hit_rect(wr), egui::Id::new((prefix, "wrench")), Sense::click());
+    icons::paint(ui.painter(), wr.shrink(if touch { 12.0 } else { 4.0 }), Icon::Wrench, if wresp.hovered() { t.tab_text_active } else { t.icon });
     app.auto.add(&format!("{prefix}.settings"), wr, "Settings");
     egui::Popup::menu(&wresp).show(|ui| {
         ui.set_min_width(240.0);
@@ -402,11 +426,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
         }
     });
     // ---- mini timeline / scrub bar
-    let bar = Rect::from_min_size(pos2(rect.min.x + 14.0, row1.max.y + 2.0), vec2(rect.width() - 28.0, 22.0));
+    let bar_y = if compact_controls { row2.max.y + 2.0 } else { row1.max.y + 2.0 };
+    let bar = Rect::from_min_size(pos2(rect.min.x + 14.0, bar_y), vec2(rect.width() - 28.0, bar_h));
     mini_timeline(app, ui, bar, which, origin, time, duration, rate, mark_in, mark_out);
 
     // ---- transport buttons
-    let row3 = Rect::from_min_size(pos2(rect.min.x, bar.max.y + 4.0), vec2(rect.width(), 32.0));
+    let row3 = Rect::from_min_size(pos2(rect.min.x, bar.max.y + 4.0), vec2(rect.width(), transport_h));
     transport(app, ui, row3, which);
 }
 
@@ -726,6 +751,58 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             (Icon::Proxy, "media.toggleProxies", tl!("Toggle Proxies")),
         ]
     };
+    if cfg!(target_os = "android") {
+        let ctx = ui.ctx().clone();
+        let prefix = if src { "source" } else { "program" };
+        let mut content_ui = ui.new_child(egui::UiBuilder::new().max_rect(row));
+        egui::ScrollArea::horizontal()
+            .id_salt((prefix, "transport-touch"))
+            .scroll_bar_visibility(egui::ScrollBarVisibility::AlwaysHidden)
+            .auto_shrink([false, false])
+            .show(&mut content_ui, |content| {
+                content.spacing_mut().item_spacing.x = 4.0;
+                content.set_min_width(buttons.len() as f32 * 48.0 + 48.0);
+                for (icon, cmd, tip) in buttons {
+                    let (r, resp) = content.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
+                    app.auto.add(&format!("{prefix}.transport.{cmd}"), r, tip);
+                    let is_play = cmd.ends_with("play") || cmd == "playback.toggle";
+                    if resp.hovered() {
+                        content.painter().rect_filled(r, 4.0, t.hover);
+                    }
+                    let sz = if is_play { 24.0 } else { 20.0 };
+                    let on = cmd == "media.toggleProxies" && app.session.media.use_proxies();
+                    let col = if on {
+                        t.accent
+                    } else if resp.hovered() {
+                        t.tab_text_active
+                    } else {
+                        t.icon
+                    };
+                    icons::paint(content.painter(), Rect::from_center_size(r.center(), vec2(sz, sz)), icon, col);
+                    if resp.clicked() {
+                        let result = match cmd {
+                            "src.markIn" => app.session.execute("markers.markIn", json!({"target": "source"})).map_err(|e| e.to_string()),
+                            "src.markOut" => app.session.execute("markers.markOut", json!({"target": "source"})).map_err(|e| e.to_string()),
+                            "src.goIn" | "src.goOut" | "src.stepBack" | "src.stepFwd" => {
+                                source_nav(app, cmd);
+                                Ok(serde_json::Value::Null)
+                            }
+                            "exportFrame" => crate::menus::invoke(app, &ctx, "file.exportFrame", json!({"monitor": if src { "source" } else { "program" }})),
+                            c => crate::menus::invoke(app, &ctx, c, json!({"monitor": if src { "source" } else { "program"}})),
+                        };
+                        if let Err(error) = result {
+                            app.ui.status = error;
+                        }
+                    }
+                }
+                let (r, resp) = content.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
+                if resp.hovered() {
+                    content.painter().rect_filled(r, 4.0, t.hover);
+                }
+                icons::paint(content.painter(), r.shrink(12.0), Icon::Plus, if resp.hovered() { t.tab_text_active } else { t.text_dim });
+            });
+        return;
+    }
     let bw = 30.0;
     let total = buttons.len() as f32 * bw;
     let mut x = row.center().x - total / 2.0;

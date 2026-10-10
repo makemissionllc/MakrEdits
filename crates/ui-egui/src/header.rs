@@ -23,9 +23,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
     }
+    let touch = cfg!(target_os = "android");
+    let button_size = if touch { 44.0 } else { 28.0 };
+    let button_pitch = if touch { 52.0 } else { 38.0 };
     let mut x = rect.min.x + if app.integrated_titlebar { 104.0 } else { 14.0 };
     // Home
-    let home = Rect::from_center_size(pos2(x + 10.0, rect.center().y), vec2(26.0, 26.0));
+    let home = Rect::from_center_size(pos2(x + button_size * 0.5, rect.center().y), vec2(button_size, button_size));
     let hresp = ui.interact(home, egui::Id::new("hdr-home"), Sense::click()).on_hover_text(tl!("Home"));
     app.auto.add("header.home", home, "Home");
     if hresp.hovered() {
@@ -40,14 +43,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     for (m, label, shown) in [(Mode::Import, "Import", tl!("Import")), (Mode::Edit, "Edit", tl!("Edit")), (Mode::Export, "Export", tl!("Export"))] {
         let active = app.ui.mode == m;
         let galley = p.layout_no_wrap(shown.to_string(), Tokens::ui(14.0), if active { t.tab_text_active } else { t.tab_text });
-        let r = Rect::from_min_size(pos2(x - 6.0, rect.min.y + 6.0), vec2(galley.size().x + 12.0, rect.height() - 12.0));
+        let mode_h = if touch { 44.0 } else { rect.height() - 12.0 };
+        let r = Rect::from_min_size(pos2(x - 6.0, rect.center().y - mode_h * 0.5), vec2((galley.size().x + 12.0).max(if touch { 44.0 } else { 0.0 }), mode_h));
         let resp = ui.interact(r, egui::Id::new(("mode", label)), Sense::click());
         app.auto.add(&format!("header.mode.{}", label.to_ascii_lowercase()), r, label);
         let col = if active || resp.hovered() { t.tab_text_active } else { t.tab_text };
         let gw = galley.size().x;
         p.galley_with_override_text_color(pos2(x, rect.center().y - galley.size().y / 2.0), galley, col);
         if active {
-            p.line_segment([pos2(x, rect.min.y + 29.0), pos2(x + gw, rect.min.y + 29.0)], Stroke::new(2.0, t.tab_text_active));
+            p.line_segment(
+                [pos2(x, rect.max.y - if touch { 7.0 } else { 9.0 }), pos2(x + gw, rect.max.y - if touch { 7.0 } else { 9.0 })],
+                Stroke::new(2.0, t.tab_text_active),
+            );
         }
         if resp.clicked() {
             app.ui.mode = m;
@@ -57,7 +64,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut left_end = x;
     // In-window menus when there is no native menu bar.
     if app.ui.show_menu_bar {
-        let menu_rect = Rect::from_min_max(pos2(x + 6.0, rect.min.y + 7.0), pos2(x + 520.0, rect.max.y - 7.0));
+        let menu_vpad = if touch { 4.0 } else { 7.0 };
+        let menu_rect = Rect::from_min_max(pos2(x + 6.0, rect.min.y + menu_vpad), pos2((x + 520.0).min(rect.max.x), rect.max.y - menu_vpad));
         let mut mu = ui.new_child(egui::UiBuilder::new().max_rect(menu_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
         mu.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         mu.style_mut().visuals.widgets.inactive.bg_stroke = Stroke::NONE;
@@ -70,8 +78,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Right cluster: icons at ~38 pt pitch, then workspace name in caps.
     let mut rx = rect.max.x - 14.0;
     let mut btn = |ui: &mut egui::Ui, icon: Icon, id: &str, tip: &str, app: &mut FilmcraftApp| -> egui::Response {
-        let r = Rect::from_center_size(pos2(rx - 14.0, rect.center().y), vec2(28.0, 28.0));
-        rx -= 38.0;
+        let half = button_size * 0.5;
+        let r = Rect::from_center_size(pos2(rx - half, rect.center().y), vec2(button_size, button_size));
+        rx -= button_pitch;
         let resp = ui.interact(r, egui::Id::new(("hdr", id)), Sense::click()).on_hover_text(tip);
         app.auto.add(&format!("header.{id}"), r, tip);
         if resp.hovered() {
@@ -94,7 +103,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.ui.mode = Mode::Export;
     }
     // Quick Export: a popup with File Name & Location, a preset list and Export (Premiere 26)
-    let qx = rect.max.x - 14.0 - 4.0 * 38.0; // the fifth button from the right
+    let qx = rect.max.x - 14.0 - 4.0 * button_pitch - button_size * 0.5; // the fifth button from the right
     if btn(ui, Icon::Export, "quickExport", tl!("Quick Export"), app).clicked() {
         app.ui.export.quick_open = !app.ui.export.quick_open;
         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("quick-export-toggled"), true));
@@ -114,7 +123,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // workspace name (caps)
     let ws = crate::i18n::t(&app.ui.workspace).to_uppercase();
     let wg = p.layout_no_wrap(ws.clone(), Tokens::ui(11.0), t.text_dim);
-    let wr = Rect::from_min_size(pos2(rx - wg.size().x + 10.0, rect.center().y - 10.0), vec2(wg.size().x + 8.0, 20.0));
+    let workspace_h = if touch { 44.0 } else { 20.0 };
+    let wr = Rect::from_min_size(
+        pos2(rx - wg.size().x + 10.0, rect.center().y - workspace_h * 0.5),
+        vec2((wg.size().x + 8.0).max(if touch { 44.0 } else { 0.0 }), workspace_h),
+    );
     let wresp = ui.interact(wr, egui::Id::new("hdr-ws-name"), Sense::click());
     app.auto.add("header.workspaceName", wr, &ws);
     p.galley_with_override_text_color(pos2(wr.min.x + 4.0, rect.center().y - wg.size().y / 2.0), wg, if wresp.hovered() { t.text } else { t.text_dim });
@@ -123,7 +136,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let label = "Discord";
         let g = p.layout_no_wrap(label.to_string(), Tokens::ui(12.0), Color32::WHITE);
         let w = g.size().x + 34.0;
-        let r = Rect::from_min_size(pos2(wr.min.x - w - 14.0, rect.center().y - 12.0), vec2(w, 24.0));
+        let discord_h = if touch { 44.0 } else { 24.0 };
+        let r = Rect::from_min_size(pos2(wr.min.x - w - 14.0, rect.center().y - discord_h * 0.5), vec2(w, discord_h));
         let resp = ui.interact(r, egui::Id::new("hdr-discord"), Sense::click()).on_hover_text(tl!("Join the ArtCraft Discord (discord.gg/artcraft)"));
         app.auto.add("header.discord", r, "Join the ArtCraft Discord");
         ui.painter().rect_filled(r, 12.0, if resp.hovered() { t.accent_hover } else { t.accent });

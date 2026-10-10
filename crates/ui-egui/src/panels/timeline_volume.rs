@@ -240,8 +240,9 @@ pub fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layou
                     continue;
                 }
                 let kr = Rect::from_center_size(c, vec2(11.0, 11.0));
-                let resp = ui.interact(kr, egui::Id::new(("tl-volume-kf", it.id.0, i)), Sense::click_and_drag());
-                app.auto.add(&format!("timeline.clip.{}.volume.kf.{i}", it.id.0), kr, "Volume keyframe");
+                let keyframe_hit = crate::widgets::touch_hit_rect(kr).intersect(row);
+                let resp = ui.interact(keyframe_hit, egui::Id::new(("tl-volume-kf", it.id.0, i)), Sense::click_and_drag());
+                app.auto.add(&format!("timeline.clip.{}.volume.kf.{i}", it.id.0), keyframe_hit, "Volume keyframe");
                 let mine = held.filter(|h| h.clip == it.id && h.index == i);
                 if resp.hovered() || mine.is_some() {
                     icons::paint(&ui.painter().with_clip_rect(area), Rect::from_center_size(c, vec2(9.0, 9.0)), Icon::Keyframe, Color32::WHITE);

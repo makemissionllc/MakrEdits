@@ -6,6 +6,11 @@ use filmcraft_time::{FrameRate, Tick, parse_timecode};
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 
+/// Keep compact desktop chrome reachable with a finger without changing its appearance on desktop.
+pub fn touch_hit_rect(rect: Rect) -> Rect {
+    if cfg!(target_os = "android") { Rect::from_center_size(rect.center(), rect.size().max(vec2(44.0, 44.0))) } else { rect }
+}
+
 /// Premiere "hot text": a blue number you drag horizontally to scrub, click to type.
 /// Returns (response, Some(new value) when changed).
 pub fn hot_number(ui: &mut Ui, id: egui::Id, value: f64, speed: f64, range: (f64, f64), decimals: usize, suffix: &str, t: &Tokens) -> (Response, Option<f64>) {
@@ -117,7 +122,7 @@ pub fn timecode_field(
         }
         return None;
     }
-    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    let resp = ui.interact(touch_hit_rect(rect), id, Sense::click_and_drag());
     ui.painter().text(pos2(rect.min.x, rect.center().y), Align2::LEFT_CENTER, text, Tokens::timecode(), color);
     // (frame at the press, frames dragged so far, where the pointer was pressed)
     let drag_id = id.with("drag");
@@ -186,7 +191,7 @@ pub fn section_header(ui: &mut Ui, id: egui::Id, title: &str, open: bool, t: &To
 
 /// A small pill toggle button with text (e.g. "M", "S" on track headers).
 pub fn letter_toggle(ui: &mut Ui, rect: Rect, letter: &str, on: bool, on_color: Color32, t: &Tokens, id: egui::Id) -> Response {
-    let resp = ui.interact(rect, id, Sense::click());
+    let resp = ui.interact(touch_hit_rect(rect), id, Sense::click());
     let bg = if on {
         on_color
     } else if resp.hovered() {
@@ -204,7 +209,7 @@ pub fn letter_toggle(ui: &mut Ui, rect: Rect, letter: &str, on: bool, on_color: 
 
 /// A flat icon toggle inside a rect.
 pub fn icon_toggle(ui: &mut Ui, rect: Rect, icon: Icon, on: bool, t: &Tokens, id: egui::Id, on_color: Option<Color32>) -> Response {
-    let resp = ui.interact(rect, id, Sense::click());
+    let resp = ui.interact(touch_hit_rect(rect), id, Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(rect, 2.0, t.hover);
     }
@@ -231,7 +236,7 @@ pub fn search_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32, t: &
 /// Premiere-style dropdown text ("Fit ▾").
 pub fn dropdown_text(ui: &mut Ui, rect: Rect, text: &str, t: &Tokens, id: egui::Id) -> Response {
     // Premiere: 24 pt, #0e0e0e fill, 1 pt #303030 border, radius 4, chevron at the right.
-    let resp = ui.interact(rect, id, Sense::click());
+    let resp = ui.interact(touch_hit_rect(rect), id, Sense::click());
     ui.painter().rect_filled(rect, 4.0, t.field_bg);
     ui.painter().rect_stroke(
         rect,

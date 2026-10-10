@@ -7,11 +7,21 @@ license.workspace = true
 default-run = "filmcraft"
 build = "build.rs"
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "filmcraft"
+path = "src/main.rs"
+required-features = ["desktop"]
+
 [lints]
 workspace = true
 
 [features]
-default = []
+default = ["desktop"]
+desktop = ["dep:rfd", "dep:cpal", "dep:chrono", "dep:sys-locale"]
+android = []
 # Speech-to-text (Text panel ▸ Transcribe) with Whisper on the CPU, and model downloads.
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
 
@@ -20,13 +30,20 @@ filmcraft-engine = { workspace = true }
 filmcraft-ui-egui = { workspace = true }
 filmcraft-platform = { workspace = true }
 egui = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
+eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
 serde_json = { workspace = true }
 log = { workspace = true }
-rfd = { workspace = true }
-cpal = "0.16"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-sys-locale = "0.3"
+rfd = { workspace = true, optional = true }
+cpal = { version = "0.16", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
+sys-locale = { version = "0.3", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+eframe = { workspace = true, features = ["android-native-activity"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { workspace = true, features = ["accesskit", "wayland", "x11"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21"

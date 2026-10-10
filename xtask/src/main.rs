@@ -73,6 +73,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("ui-egui", 5),
     ("automation", 5),
     ("filmcraft", 6),
+    ("android-entry", 6),
     ("cli", 6),
     ("web", 6),
 ];
@@ -93,6 +94,7 @@ const SAME_LAYER: &[(&str, &str)] = &[
     ("scopes", "gpu"),
     ("gpu", "render"),
     ("cli", "filmcraft"),
+    ("android-entry", "filmcraft"),
 ];
 
 /// Crates that must not appear below L5 (UI toolkits, windowing, OS audio/menus).

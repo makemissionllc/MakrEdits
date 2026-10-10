@@ -10,17 +10,21 @@ rust-version.workspace = true
 name = "filmcraft_android"
 crate-type = ["cdylib"]
 
-[lints]
-workspace = true
-
 # Like crates/platform, this crate changes the workspace `forbid` to `deny` so one narrowly
 # annotated entry point can export the symbol Android's native activity loader requires.
 [lints.rust]
 unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"
+undocumented_unsafe_blocks = "deny"
 
 [dependencies]
 filmcraft = { path = "../../apps/filmcraft", default-features = false, features = ["android"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
-

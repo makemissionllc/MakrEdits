@@ -233,6 +233,37 @@ pub fn workspace(name: &str) -> DockNode {
     use PanelKind::*;
     use SplitSize::*;
     let bottom_editing = || hsplit(FixedA(64.0), tabs(&[Tools], 0), hsplit(FixedB(116.0), tabs(&[Timeline], 0), tabs(&[AudioMeters], 0)));
+    if cfg!(target_os = "android") && matches!(name, "Editing" | "Learning" | "Review") {
+        // A tablet needs room for the picture and clips after enlarging the touch controls.
+        // Keep secondary panels in tabs instead of leaving three empty panes beside the picture.
+        return vsplit(
+            Ratio(0.5),
+            hsplit(
+                Ratio(0.3),
+                tabs(
+                    &[
+                        Project,
+                        Source,
+                        Properties,
+                        EffectControls,
+                        Effects,
+                        MediaBrowser,
+                        Libraries,
+                        Info,
+                        Markers,
+                        History,
+                        AudioClipMixer,
+                        Metadata,
+                        EssentialGraphics,
+                        Text,
+                    ],
+                    0,
+                ),
+                tabs(&[Program], 0),
+            ),
+            bottom_editing(),
+        );
+    }
     match name {
         "Assembly" => vsplit(
             Ratio(0.52),

@@ -56,6 +56,7 @@ public final class MainActivity extends NativeActivity {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Map<String, SaveWatch> saveWatches = new HashMap<>();
     private final Set<String> publishing = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> failedPublications = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private File bridgeDir;
     private File importsDir;
     private SharedPreferences preferences;
@@ -104,7 +105,7 @@ public final class MainActivity extends NativeActivity {
         if (!pickerOpen) consumePickerRequest();
         if (!permissionDialogOpen) {
             consumeMicrophoneRequest();
-            consumeNotificationRequest();
+            if (!permissionDialogOpen) consumeNotificationRequest();
         }
         reportExportProgress();
         watchSavedProjects();
@@ -204,7 +205,11 @@ public final class MainActivity extends NativeActivity {
                 || readString(new File(bridgeDir, "active-picker-mode.txt"), "open").equals("save");
         final int grantedFlags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         final ArrayList<Uri> uris = pickedUris(data);
-        io.execute(() -> finishPicker(requestId, saving, uris, grantedFlags));
+        try {
+            io.execute(() -> finishPicker(requestId, saving, uris, grantedFlags));
+        } catch (RuntimeException error) {
+            writePickerResult(requestId, new JSONArray(), "Android could not read the selected document: " + safeMessage(error), "");
+        }
     }
 
     private ArrayList<Uri> pickedUris(Intent data) {
@@ -245,14 +250,16 @@ public final class MainActivity extends NativeActivity {
                         paths.put(target.getAbsolutePath());
                     } else {
                         File target = new File(importsDir, safeId(id) + "_" + i + "_" + displayName);
+                        boolean writableProject = false;
                         if (displayName.toLowerCase(java.util.Locale.ROOT).endsWith(".fcproj")) {
                             if (persistent && (grantedFlags & Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0) {
-                                preferences.edit().putString("save_target:" + target.getAbsolutePath(), uri.toString()).apply();
+                                writableProject = true;
                             } else {
                                 warningMessage = "Project opened from a private copy. This provider did not grant write access; use Save As to update the original document.";
                             }
                         }
                         copyUriToFile(uri, target);
+                        if (writableProject) rememberOpenedProject(target, uri);
                         paths.put(target.getAbsolutePath());
                     }
                 } catch (Exception error) {
@@ -284,11 +291,31 @@ public final class MainActivity extends NativeActivity {
         }
     }
 
+    private void rememberOpenedProject(File target, Uri uri) {
+        String path = target.getAbsolutePath();
+        String initialSignature = target.length() + "_" + target.lastModified();
+        handler.post(() -> {
+            try {
+                SaveWatch state = saveWatches.computeIfAbsent(path, ignored -> new SaveWatch());
+                // Opening a document must not overwrite it. Only a later save to the private copy
+                // changes this signature and triggers a write back to the selected document.
+                state.seen = initialSignature;
+                state.synced = initialSignature;
+                preferences.edit().putString("save_target:" + path, uri.toString()).apply();
+            } catch (RuntimeException error) {
+                writeMessageEvent("Project opened from a private copy, but Android could not remember its save destination. Use Save As: " + safeMessage(error));
+            }
+        });
+    }
+
     private String displayName(Uri uri) {
         try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
             if (cursor != null && cursor.moveToFirst()) {
                 int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (column >= 0) return cursor.getString(column);
+                if (column >= 0) {
+                    String name = cursor.getString(column);
+                    if (name != null && !name.trim().isEmpty()) return name;
+                }
             }
         } catch (Exception error) {
             Log.w(TAG, "Document provider did not return a display name", error);
@@ -297,9 +324,10 @@ public final class MainActivity extends NativeActivity {
     }
 
     private void copyUriToFile(Uri uri, File target) throws Exception {
-        try (InputStream input = new BufferedInputStream(getContentResolver().openInputStream(uri));
+        try (InputStream providerInput = getContentResolver().openInputStream(uri);
              OutputStream output = new BufferedOutputStream(new FileOutputStream(target))) {
-            if (input == null) throw new IllegalStateException("the document provider returned no file data");
+            if (providerInput == null) throw new IllegalStateException("the document provider returned no file data");
+            InputStream input = new BufferedInputStream(providerInput);
             copyLimited(input, output);
         } catch (Exception error) {
             target.delete();
@@ -372,7 +400,10 @@ public final class MainActivity extends NativeActivity {
         JSONArray items = progress.optJSONArray("items");
         if (items == null) return;
         int active = 0;
-        int complete = 0;
+        int saved = 0;
+        int pending = 0;
+        int failed = 0;
+        int cancelled = 0;
         int percent = 0;
         String currentName = "";
         for (int i = 0; i < items.length(); i++) {
@@ -384,19 +415,32 @@ public final class MainActivity extends NativeActivity {
                 percent = Math.max(percent, Math.min(100, (int) Math.round(item.optDouble("progress", 0.0) * 100.0)));
                 currentName = safeName(item.optString("name", "Export"));
             } else if ("done".equals(status)) {
-                complete++;
-                enqueueMediaStorePublish(item);
+                int publication = enqueueMediaStorePublish(item);
+                if (publication > 0) saved++;
+                else if (publication == 0) pending++;
+                else failed++;
+            } else if ("failed".equals(status)) {
+                failed++;
+            } else if ("cancelled".equals(status)) {
+                cancelled++;
             }
         }
         if (active > 0) {
             exportWasActive = true;
-            postExportNotification("Exporting " + currentName, percent + "% complete", true);
+            postExportNotification("Exporting " + currentName, percent + "% complete", true, percent, false);
+        } else if (pending > 0) {
+            exportWasActive = true;
+            postExportNotification("Saving export", "Adding " + pending + " file(s) to your media library", true, 0, true);
         } else if (exportWasActive) {
             exportWasActive = false;
-            postExportNotification("Export complete", complete + " file(s) saved", false);
+            String title = failed > 0 ? "Export needs attention" : cancelled > 0 ? "Export stopped" : "Export complete";
+            String message = saved + " file(s) saved";
+            if (failed > 0) message += ", " + failed + " failed";
+            if (cancelled > 0) message += ", " + cancelled + " cancelled";
+            postExportNotification(title, message, false, 0, false);
             handler.postDelayed(() -> {
                 try {
-                    ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).cancel(NOTIFICATION_ID);
+                    if (!exportWasActive) ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).cancel(NOTIFICATION_ID);
                 } catch (RuntimeException error) {
                     Log.w(TAG, "Could not dismiss the completed export notification", error);
                 }
@@ -404,7 +448,7 @@ public final class MainActivity extends NativeActivity {
         }
     }
 
-    private void postExportNotification(String title, String message, boolean ongoing) {
+    private void postExportNotification(String title, String message, boolean ongoing, int percent, boolean indeterminate) {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return;
         try {
             Notification.Builder builder = Build.VERSION.SDK_INT >= 26
@@ -415,7 +459,7 @@ public final class MainActivity extends NativeActivity {
                     .setContentText(message)
                     .setOnlyAlertOnce(true)
                     .setOngoing(ongoing)
-                    .setProgress(100, ongoing ? Math.max(0, Math.min(100, Integer.parseInt(message.split("%", 2)[0]))) : 0, false);
+                    .setProgress(ongoing ? 100 : 0, ongoing ? Math.max(0, Math.min(100, percent)) : 0, indeterminate);
             ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).notify(NOTIFICATION_ID, builder.build());
         } catch (RuntimeException error) {
             Log.w(TAG, "Could not update the export notification", error);
@@ -424,30 +468,54 @@ public final class MainActivity extends NativeActivity {
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "FilmCraft exports", NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("Progress and completion for video exports");
-            ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(channel);
+            try {
+                NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "FilmCraft exports", NotificationManager.IMPORTANCE_LOW);
+                channel.setDescription("Progress and completion for video exports");
+                ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(channel);
+            } catch (RuntimeException error) {
+                Log.w(TAG, "Could not create the export notification channel", error);
+                writeMessageEvent("Export notifications are unavailable. Editing and exports can continue: " + safeMessage(error));
+            }
         }
     }
 
-    private void enqueueMediaStorePublish(JSONObject item) {
+    // 1 = visible in MediaStore, 0 = still being published, -1 = failed. A failed source is not
+    // retried every poll; a new export changes its signature and allows another attempt.
+    private int enqueueMediaStorePublish(JSONObject item) {
         String path = item.optString("path", "");
         File source = new File(path);
-        if (!source.isFile()) return;
+        if (!source.isFile()) {
+            if (failedPublications.add("missing:" + path)) {
+                writeMessageEvent("Export finished but its local file could not be found. Please export again.");
+            }
+            return -1;
+        }
         String signature = source.length() + "_" + source.lastModified();
         String key = "published:" + path;
-        if (signature.equals(preferences.getString(key, "")) || !publishing.add(path)) return;
-        io.execute(() -> {
-            try {
-                publishToMediaStore(source);
-                preferences.edit().putString(key, signature).apply();
-            } catch (Exception error) {
-                Log.e(TAG, "Could not save export to MediaStore", error);
-                writeMessageEvent("Export finished but could not be added to MediaStore: " + safeMessage(error));
-            } finally {
-                publishing.remove(path);
-            }
-        });
+        if (signature.equals(preferences.getString(key, ""))) return 1;
+        String failureKey = path + "@" + signature;
+        if (failedPublications.contains(failureKey)) return -1;
+        if (!publishing.add(path)) return 0;
+        try {
+            io.execute(() -> {
+                try {
+                    publishToMediaStore(source);
+                    preferences.edit().putString(key, signature).apply();
+                } catch (Exception error) {
+                    failedPublications.add(failureKey);
+                    Log.e(TAG, "Could not save export to MediaStore", error);
+                    writeMessageEvent("Export finished but could not be added to MediaStore. The local export is preserved: " + safeMessage(error));
+                } finally {
+                    publishing.remove(path);
+                }
+            });
+        } catch (RuntimeException error) {
+            publishing.remove(path);
+            failedPublications.add(failureKey);
+            writeMessageEvent("Android could not queue saving the export. The local export is preserved: " + safeMessage(error));
+            return -1;
+        }
+        return 0;
     }
 
     private void publishToMediaStore(File source) throws Exception {
@@ -476,17 +544,26 @@ public final class MainActivity extends NativeActivity {
         values.put(MediaStore.MediaColumns.IS_PENDING, 1);
         Uri destination = getContentResolver().insert(collection, values);
         if (destination == null) throw new IllegalStateException("Android did not create an export file");
-        try (InputStream input = new BufferedInputStream(new FileInputStream(source));
-             OutputStream output = new BufferedOutputStream(getContentResolver().openOutputStream(destination, "w"))) {
-            if (output == null) throw new IllegalStateException("Android did not open the export file");
-            copyLimited(input, output);
+        try {
+            try (OutputStream providerOutput = getContentResolver().openOutputStream(destination, "w");
+                 InputStream input = new BufferedInputStream(new FileInputStream(source))) {
+                if (providerOutput == null) throw new IllegalStateException("Android did not open the export file");
+                OutputStream output = new BufferedOutputStream(providerOutput);
+                copyLimited(input, output);
+            }
+            ContentValues ready = new ContentValues();
+            ready.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            if (getContentResolver().update(destination, ready, null, null) != 1) {
+                throw new IllegalStateException("Android could not make the completed export visible");
+            }
         } catch (Exception error) {
-            getContentResolver().delete(destination, null, null);
+            try {
+                getContentResolver().delete(destination, null, null);
+            } catch (RuntimeException cleanupError) {
+                Log.w(TAG, "Could not remove the incomplete MediaStore export", cleanupError);
+            }
             throw error;
         }
-        ContentValues ready = new ContentValues();
-        ready.put(MediaStore.MediaColumns.IS_PENDING, 0);
-        getContentResolver().update(destination, ready, null, null);
     }
 
     private void watchSavedProjects() {
@@ -504,28 +581,36 @@ public final class MainActivity extends NativeActivity {
             } else {
                 state.stablePolls = Math.min(state.stablePolls + 1, 10);
             }
-            if (state.stablePolls >= 2 && !signature.equals(state.synced) && !state.copying) {
+            if (state.stablePolls >= 2 && !signature.equals(state.synced) && !signature.equals(state.failed) && !state.copying) {
                 state.copying = true;
                 String uriString = (String) entry.getValue();
-                io.execute(() -> {
-                    try {
-                        copyFileToUri(file, Uri.parse(uriString));
-                        state.synced = signature;
-                    } catch (Exception error) {
-                        Log.e(TAG, "Could not update the selected project document", error);
-                        writeMessageEvent("Project saved locally, but Android could not update the selected document: " + safeMessage(error));
-                    } finally {
-                        state.copying = false;
-                    }
-                });
+                try {
+                    io.execute(() -> {
+                        try {
+                            copyFileToUri(file, Uri.parse(uriString));
+                            state.synced = signature;
+                        } catch (Exception error) {
+                            state.failed = signature;
+                            Log.e(TAG, "Could not update the selected project document", error);
+                            writeMessageEvent("Project saved locally, but Android could not update the selected document. Use Save As to choose another destination: " + safeMessage(error));
+                        } finally {
+                            state.copying = false;
+                        }
+                    });
+                } catch (RuntimeException error) {
+                    state.copying = false;
+                    state.failed = signature;
+                    writeMessageEvent("Project saved locally, but Android could not queue updating the selected document: " + safeMessage(error));
+                }
             }
         }
     }
 
     private void copyFileToUri(File source, Uri uri) throws Exception {
         try (InputStream input = new BufferedInputStream(new FileInputStream(source));
-             OutputStream output = new BufferedOutputStream(getContentResolver().openOutputStream(uri, "wt"))) {
-            if (output == null) throw new IllegalStateException("Android did not open the selected document");
+             OutputStream providerOutput = getContentResolver().openOutputStream(uri, "wt")) {
+            if (providerOutput == null) throw new IllegalStateException("Android did not open the selected document");
+            OutputStream output = new BufferedOutputStream(providerOutput);
             copyLimited(input, output);
         }
     }
@@ -643,6 +728,7 @@ public final class MainActivity extends NativeActivity {
     }
 
     private String safeName(String value) {
+        if (value == null) return "SelectedFile";
         StringBuilder out = new StringBuilder();
         for (int i = 0; i < value.length() && out.length() < 120; i++) {
             char c = value.charAt(i);
@@ -681,6 +767,7 @@ public final class MainActivity extends NativeActivity {
     private static final class SaveWatch {
         String seen = "";
         volatile String synced = "";
+        volatile String failed = "";
         int stablePolls;
         volatile boolean copying;
     }

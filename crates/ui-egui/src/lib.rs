@@ -2306,6 +2306,73 @@ mod android_picker_tests {
         assert!(app.pending_android_picker.is_none());
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn cancelled_android_picker_preserves_unsaved_project_and_allows_retry() {
+        let mut app = FilmcraftApp::new(Session::default());
+        std::sync::Arc::make_mut(&mut app.session.project).name = "Unsaved work".into();
+        app.hooks.android_picker_request = Some(Box::new(|_| Ok(())));
+        app.file_dialog("file.open", &json!({})).unwrap();
+        let request_id = app.pending_android_picker.as_ref().unwrap().request_id.clone();
+        let event = json!({"kind":"picker", "request_id":request_id, "paths":[], "error":""});
+        let mut events = Some(vec![event]);
+        app.hooks.android_take_events = Some(Box::new(move || Ok(events.take().unwrap_or_default())));
+
+        app.poll_android_bridge(&egui::Context::default());
+
+        assert!(app.pending_android_picker.is_none());
+        assert_eq!(app.session.project.name, "Unsaved work");
+        assert!(app.session.path.is_none());
+        assert!(app.file_dialog("file.saveAs", &json!({})).is_ok(), "cancelled selection must not lock later file operations");
+    }
+
+    #[test]
+    fn denied_document_access_reports_error_and_preserves_unsaved_project() {
+        let mut app = FilmcraftApp::new(Session::default());
+        std::sync::Arc::make_mut(&mut app.session.project).name = "Unsaved work".into();
+        app.hooks.android_picker_request = Some(Box::new(|_| Ok(())));
+        app.file_dialog("file.open", &json!({})).unwrap();
+        let request_id = app.pending_android_picker.as_ref().unwrap().request_id.clone();
+        let error = "Could not read the selected document: permission denied";
+        // Even if a provider sends a path along with its error, it must not replace the project.
+        let event = json!({"kind":"picker", "request_id":request_id, "paths":["/missing/project.fcproj"], "error":error});
+        let mut events = Some(vec![event]);
+        app.hooks.android_take_events = Some(Box::new(move || Ok(events.take().unwrap_or_default())));
+
+        app.poll_android_bridge(&egui::Context::default());
+
+        assert_eq!(app.ui.status, error);
+        assert_eq!(app.session.project.name, "Unsaved work");
+        assert!(app.session.path.is_none());
+        assert!(app.pending_android_picker.is_none());
+        assert!(app.file_dialog("file.open", &json!({})).is_ok(), "denied access must not lock the picker");
+    }
+
+    #[test]
+    fn microphone_and_notification_denial_leave_editor_available() {
+        let mut app = FilmcraftApp::new(Session::default());
+        std::sync::Arc::make_mut(&mut app.session.project).name = "Unsaved work".into();
+        app.hooks.android_request_microphone = Some(Box::new(|| Ok(())));
+        panels::voiceover::toggle(&mut app, None).unwrap();
+        assert!(app.pending_android_voiceover.is_some());
+        let mut events = Some(vec![json!({"kind":"microphone_permission", "granted":false})]);
+        app.hooks.android_take_events = Some(Box::new(move || Ok(events.take().unwrap_or_default())));
+
+        app.poll_android_bridge(&egui::Context::default());
+
+        assert!(app.pending_android_voiceover.is_none());
+        assert!(!app.session.voiceover.recording());
+        assert_eq!(app.android_microphone_granted, Some(false));
+        assert!(app.ui.status.contains("Microphone permission was denied"));
+        assert_eq!(app.session.project.name, "Unsaved work");
+        let mut events = Some(vec![json!({"kind":"notification_permission", "granted":false})]);
+        app.hooks.android_take_events = Some(Box::new(move || Ok(events.take().unwrap_or_default())));
+        app.poll_android_bridge(&egui::Context::default());
+        assert!(app.ui.status.contains("export will continue without a notification"));
+        assert_eq!(app.session.project.name, "Unsaved work");
+        panels::voiceover::toggle(&mut app, None).unwrap();
+        assert!(app.pending_android_voiceover.is_some(), "a later recording attempt must still be allowed");
+    }
 }
 
 #[cfg(test)]

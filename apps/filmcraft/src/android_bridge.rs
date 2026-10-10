@@ -2,6 +2,7 @@
 //! asynchronous Java APIs; this keeps them outside the Rust engine and avoids JNI/unsafe code.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -37,14 +38,10 @@ impl AndroidBridge {
             return cache.pixels;
         }
         cache.modified = modified;
-        let pixels = modified
-            .and_then(|_| fs::read(&path).ok())
-            .filter(|bytes| bytes.len() <= 1024)
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|value| {
-                let inset = |name: &str| value.get(name)?.as_u64().and_then(|value| u32::try_from(value).ok());
-                Some([inset("left")?, inset("top")?, inset("right")?, inset("bottom")?])
-            });
+        let pixels = modified.and_then(|_| read_bounded(&path, 1024).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).and_then(|value| {
+            let inset = |name: &str| value.get(name)?.as_u64().and_then(|value| u32::try_from(value).ok());
+            Some([inset("left")?, inset("top")?, inset("right")?, inset("bottom")?])
+        });
         cache.initialized = modified.is_none() || pixels.is_some();
         cache.pixels = pixels;
         pixels
@@ -106,7 +103,7 @@ impl AndroidBridge {
 
     fn take_json(&self, name: &str) -> Result<Option<Value>, String> {
         let path = self.directory.join(name);
-        let bytes = match fs::read(&path) {
+        let bytes = match read_bounded(&path, 4 * 1024 * 1024) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("could not read Android response: {error}")),
@@ -117,6 +114,17 @@ impl AndroidBridge {
         }
         serde_json::from_slice(&bytes).map(Some).map_err(|error| format!("Android returned invalid response data: {error}"))
     }
+}
+
+/// Limit allocation before parsing even when a bridge file is malformed or replaced mid-read.
+fn read_bounded(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Android bridge response exceeded its size limit"));
+    }
+    Ok(bytes)
 }
 
 pub fn safe_directory(path: Option<PathBuf>) -> Result<PathBuf, String> {

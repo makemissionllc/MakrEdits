@@ -29,12 +29,19 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     let t = app.tokens;
     let ctx = ui.ctx().clone();
     let touch = cfg!(target_os = "android");
-    let compact_controls = touch || rect.width() < 420.0;
+    let compact_controls = rect.width() < if touch { 500.0 } else { 420.0 };
     let control_row_h = if touch { 44.0 } else { 26.0 };
-    let bar_h = 22.0;
+    let bar_h = if touch { 44.0 } else { 22.0 };
     let transport_h = if touch { 44.0 } else { 32.0 };
-    let controls_h = if compact_controls { 2.0 * control_row_h + bar_h + transport_h + 8.0 } else { 28.0 + 24.0 + 36.0 };
-    let video_area = Rect::from_min_max(rect.min + vec2(4.0, 4.0), pos2(rect.max.x - 4.0, rect.max.y - controls_h));
+    let controls_h = if touch {
+        (if compact_controls { 2.0 } else { 1.0 }) * control_row_h + bar_h + transport_h + 14.0
+    } else if compact_controls {
+        2.0 * control_row_h + bar_h + transport_h + 8.0
+    } else {
+        28.0 + 24.0 + 36.0
+    };
+    let video_bottom = if touch { (rect.max.y - controls_h).max(rect.min.y + 4.0) } else { rect.max.y - controls_h };
+    let video_area = Rect::from_min_max(rect.min + vec2(4.0, 4.0), pos2(rect.max.x - 4.0, video_bottom));
     // the Source monitor's time ruler starts at `origin` (a subclip restricted to its range)
     let mut origin = Tick::ZERO;
     let (target, frame_size, rate, time, duration, drop_frame, mark_in, mark_out, name) = match which {
@@ -313,7 +320,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     // ---- controls row: timecode | zoom | res | wrench | duration
     let row1 = Rect::from_min_size(
         pos2(rect.min.x + 14.0, rect.max.y - controls_h + 2.0),
-        vec2(rect.width() - 28.0, if compact_controls { control_row_h } else { 26.0 }),
+        vec2(rect.width() - 28.0, if touch || compact_controls { control_row_h } else { 26.0 }),
     );
     let tc = format_time(time, rate, drop_frame, TimeDisplay::Timecode, 48000);
     let tc_rect = Rect::from_min_size(row1.min, vec2(110.0, row1.height()));
@@ -331,7 +338,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
     app.auto.add(&format!("{prefix}.timecode"), tc_rect, &tc);
     let dur_tc = format_time(mark_out.map(|o| o + rate.frame_duration()).unwrap_or(duration) - range_start, rate, drop_frame, TimeDisplay::Timecode, 48000);
     ui.painter().text(pos2(row1.max.x, row1.center().y), Align2::RIGHT_CENTER, &dur_tc, Tokens::timecode(), t.text_dim);
-    // Keep the time numbers on their own row when the monitor is narrow or touch-sized. The
+    // Keep the time numbers on their own row when the monitor is narrow. The
     // playback-resolution dropdown otherwise lands over the current/duration timecode.
     let row2 = Rect::from_min_size(pos2(row1.min.x, row1.max.y + 2.0), vec2(row1.width(), control_row_h));
     let (zr, rr, wr) = if compact_controls {
@@ -345,6 +352,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             Rect::from_min_size(pos2(rr_x, row2.min.y), vec2(res_w, row2.height())),
             Rect::from_min_size(pos2(row2.max.x - wrench_w, row2.min.y), vec2(wrench_w, row2.height())),
         )
+    } else if touch {
+        // A wide tablet monitor can fit the options between the two timecodes.
+        let zoom = Rect::from_min_size(pos2(row1.min.x + 116.0, row1.min.y), vec2(78.0, control_row_h));
+        let wrench = Rect::from_min_size(pos2(row1.max.x - 160.0, row1.min.y), vec2(44.0, control_row_h));
+        let resolution = Rect::from_min_size(pos2(wrench.min.x - 80.0, row1.min.y), vec2(74.0, control_row_h));
+        (zoom, resolution, wrench)
     } else {
         let zoom = Rect::from_min_size(pos2(row1.min.x + 116.0, row1.min.y), vec2(70.0, 24.0));
         let resolution = Rect::from_min_size(pos2(row1.max.x - 196.0, row1.min.y), vec2(62.0, 24.0));
@@ -752,6 +765,14 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
         ]
     };
     if cfg!(target_os = "android") {
+        let mut buttons = buttons;
+        // Keep the controls needed most often visible before the row scrolls.
+        buttons.sort_by_key(|(_, cmd, _)| match *cmd {
+            "src.stepBack" | "playhead.stepBack" => 0,
+            "source.playback.toggle" | "playback.toggle" => 1,
+            "src.stepFwd" | "playhead.stepForward" => 2,
+            _ => 3,
+        });
         let ctx = ui.ctx().clone();
         let prefix = if src { "source" } else { "program" };
         let mut content_ui = ui.new_child(egui::UiBuilder::new().max_rect(row));
@@ -761,45 +782,50 @@ fn transport(app: &mut FilmcraftApp, ui: &mut egui::Ui, row: Rect, which: Which)
             .auto_shrink([false, false])
             .show(&mut content_ui, |content| {
                 content.spacing_mut().item_spacing.x = 4.0;
-                content.set_min_width(buttons.len() as f32 * 48.0 + 48.0);
-                for (icon, cmd, tip) in buttons {
-                    let (r, resp) = content.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
-                    app.auto.add(&format!("{prefix}.transport.{cmd}"), r, tip);
-                    let is_play = cmd.ends_with("play") || cmd == "playback.toggle";
-                    if resp.hovered() {
-                        content.painter().rect_filled(r, 4.0, t.hover);
-                    }
-                    let sz = if is_play { 24.0 } else { 20.0 };
-                    let on = cmd == "media.toggleProxies" && app.session.media.use_proxies();
-                    let col = if on {
-                        t.accent
-                    } else if resp.hovered() {
-                        t.tab_text_active
-                    } else {
-                        t.icon
-                    };
-                    icons::paint(content.painter(), Rect::from_center_size(r.center(), vec2(sz, sz)), icon, col);
-                    if resp.clicked() {
-                        let result = match cmd {
-                            "src.markIn" => app.session.execute("markers.markIn", json!({"target": "source"})).map_err(|e| e.to_string()),
-                            "src.markOut" => app.session.execute("markers.markOut", json!({"target": "source"})).map_err(|e| e.to_string()),
-                            "src.goIn" | "src.goOut" | "src.stepBack" | "src.stepFwd" => {
-                                source_nav(app, cmd);
-                                Ok(serde_json::Value::Null)
-                            }
-                            "exportFrame" => crate::menus::invoke(app, &ctx, "file.exportFrame", json!({"monitor": if src { "source" } else { "program" }})),
-                            c => crate::menus::invoke(app, &ctx, c, json!({"monitor": if src { "source" } else { "program"}})),
+                // ScrollArea keeps the parent's vertical layout unless the row is explicit.
+                // Without horizontal(), every button after the first is below the clip rect.
+                content.horizontal(|content| {
+                    for (icon, cmd, tip) in buttons {
+                        let (r, resp) = content.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
+                        let resp = resp.on_hover_text(tip);
+                        app.auto.add(&format!("{prefix}.transport.{cmd}"), r, tip);
+                        let is_play = matches!(cmd, "source.playback.toggle" | "playback.toggle");
+                        if is_play {
+                            content.painter().rect_filled(r, 6.0, if resp.hovered() { t.accent_hover } else { t.accent });
+                        } else if resp.hovered() {
+                            content.painter().rect_filled(r, 4.0, t.hover);
+                        }
+                        let sz = if is_play { 24.0 } else { 20.0 };
+                        let on = cmd == "media.toggleProxies" && app.session.media.use_proxies();
+                        let col = if is_play {
+                            Color32::WHITE
+                        } else if on {
+                            t.accent
+                        } else if resp.hovered() {
+                            t.tab_text_active
+                        } else {
+                            t.icon
                         };
-                        if let Err(error) = result {
-                            app.ui.status = error;
+                        icons::paint(content.painter(), Rect::from_center_size(r.center(), vec2(sz, sz)), icon, col);
+                        if resp.clicked() {
+                            let result = match cmd {
+                                "src.markIn" => app.session.execute("markers.markIn", json!({"target": "source"})).map_err(|e| e.to_string()),
+                                "src.markOut" => app.session.execute("markers.markOut", json!({"target": "source"})).map_err(|e| e.to_string()),
+                                "src.goIn" | "src.goOut" | "src.stepBack" | "src.stepFwd" => {
+                                    source_nav(app, cmd);
+                                    Ok(serde_json::Value::Null)
+                                }
+                                "exportFrame" => {
+                                    crate::menus::invoke(app, &ctx, "file.exportFrame", json!({"monitor": if src { "source" } else { "program" }}))
+                                }
+                                c => crate::menus::invoke(app, &ctx, c, json!({"monitor": if src { "source" } else { "program"}})),
+                            };
+                            if let Err(error) = result {
+                                app.ui.status = error;
+                            }
                         }
                     }
-                }
-                let (r, resp) = content.allocate_exact_size(vec2(44.0, 44.0), Sense::click());
-                if resp.hovered() {
-                    content.painter().rect_filled(r, 4.0, t.hover);
-                }
-                icons::paint(content.painter(), r.shrink(12.0), Icon::Plus, if resp.hovered() { t.tab_text_active } else { t.text_dim });
+                });
             });
         return;
     }

@@ -25,11 +25,11 @@ use crate::theme::Tokens;
 use super::timeline_hit::{EdgeKind, Grab, edge_geometry, grab_at};
 pub use super::timeline_hit::{Hit, ROLL_PX, hit, selection_trim_kind};
 
-const TOP_H: f32 = if cfg!(target_os = "android") { 84.0 } else { 58.0 }; // timecode + toolbar (left) / ruler (right)
+const TOP_H: f32 = if cfg!(target_os = "android") { 48.0 } else { 58.0 }; // toolbar (left) / ruler (right)
 const RULER_H: f32 = 44.0;
-const SCROLLBAR_H: f32 = 17.0;
+const SCROLLBAR_H: f32 = if cfg!(target_os = "android") { 44.0 } else { 17.0 };
 const DIVIDER_H: f32 = 5.0;
-const MASTER_H: f32 = 34.0;
+const MASTER_H: f32 = if cfg!(target_os = "android") { 0.0 } else { 34.0 };
 const SNAP_PX: f32 = 9.0;
 
 /// Transient interaction state.
@@ -474,16 +474,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.ui.timeline.split = f.clamp(0.1, 0.9);
     }
     // master track
-    let master = Rect::from_min_max(pos2(rect.min.x, tracks_area.max.y - MASTER_H), pos2(content.max.x, tracks_area.max.y));
-    painter.rect_filled(master, 0.0, t.tl_header_bg);
-    painter.text(pos2(rect.min.x + 44.0, master.center().y), Align2::LEFT_CENTER, tl!("Mix"), Tokens::ui(11.5), t.text);
-    painter.text(
-        pos2(rect.min.x + header_w - 12.0, master.center().y),
-        Align2::RIGHT_CENTER,
-        format!("{:.1}", seq.master_volume_db),
-        Tokens::ui(11.5),
-        t.hot_text,
-    );
+    if MASTER_H > 0.0 {
+        let master = Rect::from_min_max(pos2(rect.min.x, tracks_area.max.y - MASTER_H), pos2(content.max.x, tracks_area.max.y));
+        painter.rect_filled(master, 0.0, t.tl_header_bg);
+        painter.text(pos2(rect.min.x + 44.0, master.center().y), Align2::LEFT_CENTER, tl!("Mix"), Tokens::ui(11.5), t.text);
+        painter.text(
+            pos2(rect.min.x + header_w - 12.0, master.center().y),
+            Align2::RIGHT_CENTER,
+            format!("{:.1}", seq.master_volume_db),
+            Tokens::ui(11.5),
+            t.hot_text,
+        );
+    }
 
     // ---- caption tracks
     if cap_n > 0 {
@@ -521,7 +523,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     zoom_scrollbar(
         app,
         ui,
-        Rect::from_min_max(pos2(content.min.x, rect.max.y - SCROLLBAR_H + 2.0), pos2(content.max.x, rect.max.y - 2.0)),
+        Rect::from_min_max(
+            pos2(content.min.x, rect.max.y - SCROLLBAR_H + if cfg!(target_os = "android") { 0.0 } else { 2.0 }),
+            pos2(content.max.x, rect.max.y - if cfg!(target_os = "android") { 0.0 } else { 2.0 }),
+        ),
         seq.duration().seconds(),
         &t,
     );
@@ -1153,7 +1158,15 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
     p.rect_filled(Rect::from_min_max(rect.min, pos2(rect.max.x, ruler.max.y)), 0.0, t.panel_bg);
     // current timecode: Premiere's big blue timecode
     let tc = format_time(app.session.playhead(), rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
-    let tc_rect = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 20.0, 20.0));
+    let touch = cfg!(target_os = "android");
+    let tc_rect = if touch {
+        // Use the empty space beside the zoom bar for time entry, leaving more height for tracks.
+        let r = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.max.y - SCROLLBAR_H), vec2(hw - 20.0, 44.0));
+        p.rect_filled(r, 0.0, t.tl_header_bg);
+        r
+    } else {
+        Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 20.0, 20.0))
+    };
     let tc_id = egui::Id::new(("timeline-tc", seq_id));
     match crate::widgets::timecode_field(ui, tc_id, tc_rect, &tc, app.session.playhead(), Tick::ZERO, rate, seq.settings.drop_frame, t.timecode) {
         Some(Ok(time)) => {
@@ -1167,9 +1180,8 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
     app.auto.add("timeline.timecode", tc_rect, &tc);
     // toolbar: 30 × 30 buttons, "on" = #4b4b4b fill
     let mut x = rect.min.x + 12.0;
-    let touch = cfg!(target_os = "android");
     let toggle_size = if touch { 44.0 } else { 28.0 };
-    let y = rect.min.y + 26.0;
+    let y = rect.min.y + if touch { 2.0 } else { 26.0 };
     let toggles: [(Icon, &str, bool, bool, &str); 6] = [
         (Icon::Nest, "nest", !app.session.state.sequences_as_clips, true, tl!("Insert and overwrite sequences as nests or individual clips")),
         (Icon::Magnet, "snap", app.session.state.snapping, true, tl!("Snap in Timeline (S)")),
@@ -1337,7 +1349,7 @@ fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequenc
 
 /// The narrowest the zoom scroll bar's thumb gets: room for its two handles and a part between
 /// them to grab.
-const MIN_THUMB_W: f32 = 34.0;
+const MIN_THUMB_W: f32 = if cfg!(target_os = "android") { 132.0 } else { 34.0 };
 
 /// Where the zoom scroll bar's thumb is: (left edge, width, seconds of scroll per point of thumb
 /// travel). The thumb is as wide as the share of the Timeline in view (never narrower than
@@ -1392,9 +1404,9 @@ fn zoom_scrollbar(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, seq_seco
         let mode = if !thumb.expand2(vec2(0.0, 4.0)).contains(pos) {
             jump(&mut app.ui.timeline, pos.x);
             0
-        } else if (pos.x - thumb.min.x).abs() < 9.0 {
+        } else if (pos.x - thumb.min.x).abs() < if cfg!(target_os = "android") { 44.0 } else { 9.0 } {
             1
-        } else if (pos.x - thumb.max.x).abs() < 9.0 {
+        } else if (pos.x - thumb.max.x).abs() < if cfg!(target_os = "android") { 44.0 } else { 9.0 } {
             2
         } else {
             0
